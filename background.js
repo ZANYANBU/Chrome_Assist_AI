@@ -242,7 +242,7 @@ async function runAgentLoop(userGoal) {
       if (execResult.success &&
           decision.action === 'navigate' &&
           steps >= 2 &&
-          checkGoalSatisfied(userGoal, decision.value || '', currentTitle, actionHistory)) {
+          checkGoalSatisfied(userGoal, decision.value || '', currentTitle, actionHistory, steps)) {
         const completionMsg = 'Goal accomplished. Navigated to ' + (decision.value || currentUrl) + ' as required.';
         broadcast({ action: 'AGENT_COMPLETE', result: completionMsg, steps });
         await saveTaskHistory(userGoal, steps, true);
@@ -291,15 +291,17 @@ function validateDoneAction(decision, goal, currentUrl, history) {
   // 2. Thought must NOT describe a page element or suggest a next action
   //    These are dead giveaways that the LLM is confused about what "done" means.
   const badPhrases = [
-    'could be', 'is currently', 'currently visible', 'is visible',
-    'next action', 'next single', 'the element', 'button with id',
-    'element with id', 'element id', 'id \'', 'might be', 'next step',
+    'could be', 'could be the', 'can be', 'is currently', 'currently visible', 'is visible',
+    'next action', 'next single', 'the next action', 'would be the next', 'could be the next',
+    'the element', 'button with id', 'element with id', 'element id', 'id \'',
+    'might be', 'might be the', 'next step', 'the next step',
     'you could', 'you should', 'consider', 'perhaps', 'suggest',
     'try ', 'would be', 'needs to', 'need to', 'should be',
     'click on', 'type into', 'navigate to', 'you can',
     'to complete', 'to finish', 'to accomplish', 'action to take',
     'action would be', 'further action', 'could also',
     'is the next', 'takes you', 'will take',
+    'appears to be', 'seems to be', 'it appears', 'it seems',
   ];
   if (badPhrases.some(p => thought.includes(p))) return false;
 
@@ -542,13 +544,16 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
     '11. If a step failed, try a different element_id or navigate to a direct search URL.\n' +
     '12. Never repeat the same failed action+element_id.\n' +
     '13. Scroll down to reveal more elements if the target is not visible.\n\n' +
-    '━━━ RESPOND IN JSON ONLY ━━━\n' +
+    '━━━ RESPOND IN JSON ONLY — NO markdown, NO code fences, NO extra text ━━━\n' +
+    'Example response:\n' +
+    '{"thought":"I see the YouTube homepage. I will navigate directly to the search results for lo-fi music.","action":"navigate","element_id":null,"value":"https://www.youtube.com/results?search_query=lo-fi+music","is_complete":false}\n\n' +
+    'Your response must be exactly one JSON object:\n' +
     '{\n' +
     '  "thought": "I see [observation]. I will [action].",\n' +
     '  "action": "navigate|click|type|key|scroll|hover|select|wait|done",\n' +
     '  "element_id": null_or_integer,\n' +
     '  "value": "string or null",\n' +
-    '  "is_complete": false\n' +
+    '  "is_complete": true_if_done_else_false\n' +
     '}';
 
   if (settings.provider === 'gemini') return callGemini(prompt, settings);
@@ -560,7 +565,7 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
 // =============================================================================
 async function callOllama(prompt, settings) {
   const baseUrl = (settings.ollamaUrl || 'http://localhost:11434').replace(/\/$/, '');
-  const model   = settings.ollamaModel || 'llama3.2:1b';
+  const model   = settings.ollamaModel || 'llama3.2:latest';
 
   const jsonSchema = {
     type: 'object',
@@ -583,10 +588,13 @@ async function callOllama(prompt, settings) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model,
-        messages: [{ role: 'user', content: prompt }],
+        messages: [
+          { role: 'system', content: 'You are COMET, a precise browser automation agent. Always respond with valid JSON only. Never include markdown, code fences, or explanation outside the JSON object.' },
+          { role: 'user', content: prompt }
+        ],
         stream: false,
         format: jsonSchema,
-        options: { temperature: 0.1, num_predict: 600 }
+        options: { temperature: 0, num_predict: 800 }
       })
     });
     if (res.ok) {
@@ -605,7 +613,7 @@ async function callOllama(prompt, settings) {
         prompt,
         stream: false,
         format: jsonSchema,
-        options: { temperature: 0.1, num_predict: 600 }
+        options: { temperature: 0, num_predict: 800 }
       })
     });
     if (!res.ok) {
@@ -690,9 +698,10 @@ function extractJSON(text) {
 // =============================================================================
 // GOAL SATISFACTION CHECK
 // =============================================================================
-function checkGoalSatisfied(goal, url, title, history) {
-  const gl = goal.toLowerCase();
-  const ul = url.toLowerCase();
+function checkGoalSatisfied(goal, url, title, history, steps) {
+  const gl    = goal.toLowerCase();
+  const ul    = url.toLowerCase();
+  const steps_ = steps || 0;
 
   const siteMap = [
     ['youtube', 'youtube.com'], ['amazon', 'amazon.com'], ['google', 'google.com'],
@@ -705,16 +714,27 @@ function checkGoalSatisfied(goal, url, title, history) {
     ['duckduckgo', 'duckduckgo.com'], ['huggingface', 'huggingface.co'],
   ];
 
+  const isSearchGoal = /search|find|look for|query/i.test(gl);
+
   for (const [keyword, domain] of siteMap) {
     if (gl.includes(keyword) && ul.includes(domain)) {
-      // If a search is required, check search URL patterns
-      if (gl.includes('search') || gl.includes('find') || gl.includes('look for')) {
-        if (ul.includes('search') || ul.includes('q=') || ul.includes('query') || ul.includes('results')) {
-          return true;
-        }
-        return false;
+      // Search tasks: need search URL AND at least 3 steps (navigate + search action + results)
+      if (isSearchGoal) {
+        if (steps_ < 3) return false;
+        const searchUrlPatterns = ['search', 'q=', 'query=', 'results', 's?k=', '/search/', 'search_query', 'find='];
+        // URL must confirm search results are being shown — not just the site homepage
+        if (searchUrlPatterns.some(p => ul.includes(p))) return true;
+        // Also check history for a prior navigate to a search URL
+        const histSearched = history.some(h =>
+          h.action === 'navigate' && h.value &&
+          searchUrlPatterns.some(p => h.value.toLowerCase().includes(p))
+        );
+        return histSearched;
       }
-      return true;
+      // Navigation-only tasks — just being on the right site is enough
+      // But require the URL to NOT be a generic browser page and steps >= 2
+      if (steps_ >= 2 && ul.includes(domain)) return true;
+      return false;
     }
   }
   const rawUrl = goal.match(/https?:\/\/[^\s]+/);

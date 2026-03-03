@@ -39,7 +39,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (s.provider)    providerSel.value  = s.provider;
   if (s.apiKey)      geminiKey.value    = s.apiKey;
   if (s.ollamaUrl)   ollamaUrl.value    = s.ollamaUrl;
-  if (s.ollamaModel) ollamaModel.value  = s.ollamaModel;
+  // Auto-upgrade: llama3.2:1b is too small (1B) — silently promote to llama3.2:latest (3B)
+  const savedModel = s.ollamaModel === 'llama3.2:1b' ? 'llama3.2:latest' : (s.ollamaModel || 'llama3.2:latest');
+  ollamaModel.value = savedModel;
   updateProvider();
 
   // ── Connection ping ─────────────────────────────────────────────
@@ -99,9 +101,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       const r = await fetch(url + '/api/tags', { signal: AbortSignal.timeout(5000) });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const d  = await r.json();
-      const models = (d.models || []).map(m => m.name).join(', ') || '(no models found)';
+      const modelList = (d.models || []).map(m => m.name);
+      const models    = modelList.join(', ') || '(no models found)';
+      // Recommend the best available model
+      const preferred = ['llama3.2:latest','llama3:latest','llama3','mistral:latest','mistral','llama3.1:latest','llama3.1'];
+      const best = preferred.find(p => modelList.includes(p)) || modelList[0] || null;
+      if (best && ollamaModel.value !== best) {
+        ollamaModel.value = best;
+      }
+      const rec = best ? ' → auto-selected: ' + best : '';
       testOut.className = 'test-out ok';
-      testOut.textContent = '✓ Connected! Available models: ' + models;
+      testOut.textContent = '✓ Connected! Models: ' + models + rec;
     } catch (e) {
       testOut.className = 'test-out fail';
       testOut.textContent = '✗ Failed: ' + e.message + '. Make sure Ollama is running.';
