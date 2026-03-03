@@ -9,6 +9,11 @@
 
 'use strict';
 
+// Open Side Panel on Icon Click
+if (chrome.sidePanel) {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
+}
+
 // --- Global state ------------------------------------------------------------
 let agentActive   = false;
 let agentAbort    = false;
