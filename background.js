@@ -57,18 +57,15 @@ async function runAgentLoop(userGoal) {
 
   try {
     const allTabs = await chrome.tabs.query({});
-    let memoryStr = '--- LONG CONTEXT MEMORY: OPEN TABS ---
-';
+    let memoryStr = '--- LONG CONTEXT MEMORY: OPEN TABS ---\n';
     for (const t of allTabs) {
       if (t.url && !t.url.startsWith('chrome')) {
-        memoryStr += `[@tab_id_] Title:  | URL: ` + '
-';
+        memoryStr += `[@${t.id}] Title: ${t.title || 'Untitled'} | URL: ${t.url}\n`;
       }
     }
     const pastMemory = await chrome.storage.local.get(['zanysurf_session_history']);
     if (pastMemory.zanysurf_session_history) {
-      memoryStr += '\n--- PAST SESSION MEMORIES ---
-' + pastMemory.zanysurf_session_history;
+      memoryStr += '\n--- PAST SESSION MEMORIES ---\n' + pastMemory.zanysurf_session_history;
     }
     globalMemoryContext = memoryStr;
   } catch(e) {}
