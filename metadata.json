@@ -1,0 +1,5 @@
+{
+  "name": "BYOM AI Browser Agent",
+  "description": "A lightweight Chrome Extension agent that uses your own Gemini or Ollama models to analyze and interact with webpages.",
+  "requestFramePermissions": []
+}

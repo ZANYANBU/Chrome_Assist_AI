@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>COMET AI Agent</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+  <!-- HEADER -->
+  <div class="header">
+    <div class="logo">
+      <span class="star">✦</span>
+      <span class="name">COMET</span>
+      <span class="tag">AI Agent</span>
+    </div>
+    <div class="hbtns">
+      <div id="conn-dot" class="conn-dot" title="Ollama connection status"></div>
+      <button id="clear-btn" class="hbtn" title="New task">↺</button>
+      <button id="settings-btn" class="hbtn" title="Settings">⚙</button>
+    </div>
+  </div>
+
+  <!-- SETTINGS PANEL -->
+  <div id="settings-panel" class="settings-panel hidden">
+    <div class="s-title">⚙ Settings</div>
+    <div class="field">
+      <label>Provider</label>
+      <select id="provider-select">
+        <option value="ollama">Ollama (Local — Free)</option>
+        <option value="gemini">Gemini API (Cloud)</option>
+      </select>
+    </div>
+
+    <div id="ollama-fields">
+      <div class="field">
+        <label>Ollama URL</label>
+        <input id="ollama-url" type="url" placeholder="http://localhost:11434" value="http://localhost:11434">
+      </div>
+      <div class="field">
+        <label>Model</label>
+        <input id="ollama-model" type="text" placeholder="llama3.2:1b" value="llama3.2:1b">
+      </div>
+      <div class="field-hint">Install models: <code>ollama pull llama3.2:1b</code></div>
+    </div>
+
+    <div id="gemini-fields" class="hidden">
+      <div class="field">
+        <label>Gemini API Key</label>
+        <input id="gemini-key" type="password" placeholder="AIza…">
+      </div>
+      <div class="field-hint">Get key at <a href="https://aistudio.google.com" target="_blank">aistudio.google.com</a></div>
+    </div>
+
+    <div class="s-btns">
+      <button id="save-btn" class="btn-pri">💾 Save</button>
+      <button id="test-btn" class="btn-sec">🔌 Test Connection</button>
+    </div>
+    <div id="test-out" class="test-out hidden"></div>
+  </div>
+
+  <!-- LIVE STATUS BAR -->
+  <div id="live-bar" class="live-bar hidden">
+    <div class="live-bar-inner">
+      <div class="live-left">
+        <div class="spinner"></div>
+        <div class="live-info">
+          <div id="live-step">Starting…</div>
+          <div id="live-url" class="live-url"></div>
+        </div>
+      </div>
+      <button id="stop-btn" class="stop-btn">■ Stop</button>
+    </div>
+    <div id="live-progress" class="live-progress"></div>
+  </div>
+
+  <!-- CHAT AREA -->
+  <div id="chat" class="chat"></div>
+
+  <!-- INPUT BAR -->
+  <div class="input-row">
+    <textarea
+      id="input"
+      placeholder="What should I do? e.g. Go to GitHub and search for react projects"
+      rows="2"
+      autocomplete="off"
+      spellcheck="false"
+    ></textarea>
+    <button id="send-btn" class="send-btn" title="Run agent (Enter)">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+        <path d="M2 21L23 12 2 3v7l15 2-15 2z"/>
+      </svg>
+    </button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
