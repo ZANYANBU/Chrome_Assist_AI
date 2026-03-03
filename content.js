@@ -1,11 +1,11 @@
 /**
- * COMET AI Browser Agent - Content Script v4
+ * ZANYSURF AI Browser Agent - Content Script v4
  * DOM annotation, element mapping, and robust action execution.
  * Handles vanilla JS, React, Vue, Angular, and Shadow DOM.
  */
 
-if (!window.__comet_agent_initialized) {
-  window.__comet_agent_initialized = true;
+if (!window.__ZANYSURF_agent_initialized) {
+  window.__ZANYSURF_agent_initialized = true;
 
   let elementMap = [];
 
@@ -123,7 +123,7 @@ if (!window.__comet_agent_initialized) {
       // Visual badge overlay
       try {
         const badge = document.createElement('div');
-        badge.className = '__comet_badge';
+        badge.className = '__ZANYSURF_badge';
         badge.textContent = id;
         Object.assign(badge.style, {
           position: 'fixed',
@@ -170,7 +170,7 @@ if (!window.__comet_agent_initialized) {
   }
 
   function clearBadges() {
-    document.querySelectorAll('.__comet_badge').forEach(b => b.remove());
+    document.querySelectorAll('.__ZANYSURF_badge').forEach(b => b.remove());
   }
 
   // ── React-compatible value setter ───────────────────────────────
@@ -304,3 +304,4 @@ if (!window.__comet_agent_initialized) {
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 }
+

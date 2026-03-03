@@ -1,5 +1,5 @@
 /**
- * COMET AI Agent — Popup Controller v4
+ * ZANYSURF AI Agent — Popup Controller v4
  * Full chain-of-thought UI: step cards, live status, page refs, reasoning display.
  */
 
@@ -258,7 +258,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       <div class="welcome">
         <div class="welcome-icon">✦</div>
         <div class="welcome-body">
-          <strong>COMET AI Agent</strong>
+          <strong>ZANYSURF AI Agent</strong>
           <span>Autonomous browser assistant powered by local Ollama.<br>
           Watch me think step by step and control your browser.</span>
           <div class="welcome-examples">
@@ -432,3 +432,4 @@ document.addEventListener('DOMContentLoaded', async () => {
       .replace(/"/g,'&quot;');
   }
 });
+

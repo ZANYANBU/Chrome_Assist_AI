@@ -1,6 +1,6 @@
 <div align="center">
 
-# ✦ COMET AI Browser Agent
+# ✦ ZANYSURF AI Browser Agent
 
 ### Autonomous AI-powered Chrome Extension for intelligent browser control
 
@@ -10,7 +10,7 @@
 [![Gemini](https://img.shields.io/badge/Google-Gemini-4285F4?style=for-the-badge&logo=google)](https://ai.google.dev)
 [![License](https://img.shields.io/badge/License-MIT-purple?style=for-the-badge)](LICENSE)
 
-> **COMET** is a fully autonomous AI browser agent that lives inside Chrome.  
+> **ZANYSURF** is a fully autonomous AI browser agent that lives inside Chrome.  
 > Give it a goal in plain English — it reasons step by step, maps the page,  
 > clicks buttons, types into fields, navigates URLs, and shows you exactly  
 > what it is thinking at every stage.
@@ -21,7 +21,7 @@
 
 ## 📖 Table of Contents
 
-- [What is COMET?](#-what-is-comet)
+- [What is ZANYSURF?](#-what-is-ZANYSURF)
 - [How It Works](#-how-it-works)
 - [Features](#-features)
 - [Architecture](#-architecture)
@@ -40,9 +40,9 @@
 
 ---
 
-## 🚀 What is COMET?
+## 🚀 What is ZANYSURF?
 
-**COMET** (Chain-of-thought Orchestrated Machine for Exploratory Tasks) is a  
+**ZANYSURF** (Chain-of-thought Orchestrated Machine for Exploratory Tasks) is a  
 Chrome Extension that turns any LLM — running locally via [Ollama](https://ollama.com)  
 or in the cloud via [Google Gemini](https://ai.google.dev) — into a fully autonomous  
 web agent.
@@ -51,7 +51,7 @@ Instead of clicking around the browser manually, you type a goal like:
 
 > *"Go to GitHub and search for React projects"*
 
-COMET takes over: navigates to GitHub, maps every interactive element on the page,  
+ZANYSURF takes over: navigates to GitHub, maps every interactive element on the page,  
 constructs the correct search URL, submits the query, and reports back — showing  
 chain-of-thought reasoning at every single step.
 
@@ -309,7 +309,7 @@ cd Chrome_Assist_AI
 2. Enable **Developer mode** (top-right toggle)
 3. Click **"Load unpacked"**
 4. Select the **`extension/`** folder inside the cloned repo
-5. Click the 🧩 icon in Chrome and pin **COMET AI Agent**
+5. Click the 🧩 icon in Chrome and pin **ZANYSURF AI Agent**
 
 ---
 
@@ -350,7 +350,7 @@ The extension uses **Gemini 1.5 Flash** — fast and within the free usage tier.
 
 ### Starting a Task
 
-1. Click the **COMET** toolbar icon
+1. Click the **ZANYSURF** toolbar icon
 2. Type your goal in the text box, or click an example pill
 3. Press **Enter** (or Shift+Enter for newline) or click **✦**
 4. Watch the agent work in the step cards below
@@ -435,7 +435,7 @@ While running:
 
 ## 🌐 Supported Sites with Site-Specific Hints
 
-COMET injects tailored DOM knowledge into the LLM prompt for these sites,  
+ZANYSURF injects tailored DOM knowledge into the LLM prompt for these sites,  
 dramatically improving accuracy without needing to map every element:
 
 | Site | Injected Knowledge |
@@ -494,7 +494,7 @@ The extension tries `/api/chat` first (Ollama ≥ 0.1.14), then falls back to `/
 
 ### Robust JSON Extraction (4 Strategies)
 
-Even if the LLM adds text around its JSON response, COMET recovers it:
+Even if the LLM adds text around its JSON response, ZANYSURF recovers it:
 
 1. Direct `JSON.parse(rawText)`
 2. Strip ` ```json ``` ` markdown fences, then parse
@@ -542,13 +542,13 @@ Visibility checks:
 
 Shadow DOM traversal: up to **4 levels** deep.
 
-Each element gets a visual badge overlay (`.__comet_badge`) and is listed in  
+Each element gets a visual badge overlay (`.__ZANYSURF_badge`) and is listed in  
 the DOM map string as: `[ID] tag role "text description" (type) href/value`
 
 ### React / Vue / Angular Input Compatibility
 
 Standard `element.value = text` does not trigger React's synthetic events.  
-COMET uses the native HTMLInputElement prototype setter:
+ZANYSURF uses the native HTMLInputElement prototype setter:
 
 ```javascript
 const proto = (el.tagName === 'TEXTAREA')
@@ -562,7 +562,7 @@ el.dispatchEvent(new Event('change', { bubbles: true }));
 
 ### Cookie Banner Auto-Dismiss
 
-Before building the DOM map each step, COMET clicks any visible button  
+Before building the DOM map each step, ZANYSURF clicks any visible button  
 matching these exact texts (case-insensitive):
 
 ```
@@ -659,6 +659,7 @@ Distributed under the [MIT License](LICENSE).
 
 Built with local AI, Chrome MV3, and zero external servers.
 
-**[⭐ Star this repo](https://github.com/ZANYANBU/Chrome_Assist_AI) if COMET is useful to you!**
+**[⭐ Star this repo](https://github.com/ZANYANBU/Chrome_Assist_AI) if ZANYSURF is useful to you!**
 
 </div>
+

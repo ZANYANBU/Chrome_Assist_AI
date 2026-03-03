@@ -1,5 +1,5 @@
-﻿/**
- * COMET AI Browser Agent — Background Service Worker v4
+/**
+ * ZANYSURF AI Browser Agent � Background Service Worker v4
  * Fully autonomous chain-of-thought browser agent with robust JSON parsing,
  * multi-provider LLM support, and reliable browser control.
  *
@@ -9,13 +9,14 @@
 
 'use strict';
 
-// ─── Global state ────────────────────────────────────────────────────────────
+// --- Global state ------------------------------------------------------------
 let agentActive   = false;
 let agentAbort    = false;
 let actionHistory = [];
 let sessionGoal   = '';
+let globalMemoryContext = ''; // added for Long Context Memory
 
-// ─── Message router ──────────────────────────────────────────────────────────
+// --- Message router ----------------------------------------------------------
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'RUN_AGENT') {
     agentAbort = false;
@@ -54,7 +55,25 @@ async function runAgentLoop(userGoal) {
   let lastFingerprint = ''; // action+value+element_id hash for loop detection
   const MAX_STEPS = 30;
 
-  broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'Agent starting…' });
+  try {
+    const allTabs = await chrome.tabs.query({});
+    let memoryStr = '--- LONG CONTEXT MEMORY: OPEN TABS ---
+';
+    for (const t of allTabs) {
+      if (t.url && !t.url.startsWith('chrome')) {
+        memoryStr += `[@tab_id_] Title:  | URL: ` + '
+';
+      }
+    }
+    const pastMemory = await chrome.storage.local.get(['zanysurf_session_history']);
+    if (pastMemory.zanysurf_session_history) {
+      memoryStr += '\n--- PAST SESSION MEMORIES ---
+' + pastMemory.zanysurf_session_history;
+    }
+    globalMemoryContext = memoryStr;
+  } catch(e) {}
+
+  broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'Agent starting�' });
 
   while (agentActive && !agentAbort && steps < MAX_STEPS) {
     steps++;
@@ -107,7 +126,7 @@ async function runAgentLoop(userGoal) {
           currentUrl, currentTitle, steps
         );
       } catch (e) {
-        broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'LLM error, retrying…' });
+        broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'LLM error, retrying�' });
         await sleep(2000);
         try {
           decision = await getNextAction(
@@ -147,7 +166,7 @@ async function runAgentLoop(userGoal) {
           if (!url.startsWith('http')) url = 'https://' + url;
           try {
             await chrome.tabs.update(tab.id, { url });
-            broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'Navigating to ' + url + '…' });
+            broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'Navigating to ' + url + '�' });
             await sleep(800);
             await waitForTabReady(tab.id);
             await sleep(700);
@@ -229,7 +248,7 @@ async function runAgentLoop(userGoal) {
           const rr = await chrome.tabs.sendMessage(tab.id, { action: 'EXECUTE', command: decision });
           if (rr && rr.success) {
             execResult = { success: true, detail: (rr.result || 'Retried OK') };
-            broadcast({ action: 'AGENT_EXEC_RESULT', step: steps, success: true, detail: '↺ ' + execResult.detail });
+            broadcast({ action: 'AGENT_EXEC_RESULT', step: steps, success: true, detail: '? ' + execResult.detail });
           }
         } catch (_) {}
       }
@@ -255,14 +274,14 @@ async function runAgentLoop(userGoal) {
         lastFingerprint = fingerprint;
       }
       if (stuckCount >= 2) {
-        // 2 identical steps in a row → force an escape
+        // 2 identical steps in a row ? force an escape
         stuckCount = 0;
         lastFingerprint = '';
         const escapeUrl = buildSearchUrl(userGoal);
         const escapeDecision = escapeUrl
           ? { thought: 'I am stuck repeating the same action. Navigating directly to the search results URL to break the loop.', action: 'navigate', value: escapeUrl, element_id: null, is_complete: false }
           : { thought: 'I am stuck. Scrolling down to reveal new content.', action: 'scroll', value: 'down', element_id: null, is_complete: false };
-        broadcast({ action: 'AGENT_STATUS', status: 'running', message: '⚠ Loop detected — escaping…' });
+        broadcast({ action: 'AGENT_STATUS', status: 'running', message: '? Loop detected � escaping�' });
         await chrome.tabs.sendMessage(tab.id, { action: 'EXECUTE', command: escapeDecision }).catch(() => {});
         if (escapeDecision.action === 'navigate') {
           await chrome.tabs.update(tab.id, { url: escapeDecision.value });
@@ -294,7 +313,7 @@ async function runAgentLoop(userGoal) {
       await sleep(900);
 
     } catch (err) {
-      console.error('[COMET] Loop error:', err);
+      console.error('[ZANYSURF] Loop error:', err);
       broadcast({ action: 'AGENT_ERROR', error: err.message });
       await saveTaskHistory(userGoal, steps, false);
       break;
@@ -352,7 +371,7 @@ function validateDoneAction(decision, goal, currentUrl, history) {
   if (isSearchTask) {
     const searchUrlPatterns = ['search', 'q=', 'query=', 'results', 's?k=', '/search/', 'find='];
     const urlConfirmsSearch = searchUrlPatterns.some(p => ul.includes(p));
-    // Also check history — maybe we navigated to a search URL in a prior step
+    // Also check history � maybe we navigated to a search URL in a prior step
     const historyConfirmsSearch = history.some(h =>
       h.action === 'navigate' && h.value &&
       searchUrlPatterns.some(p => h.value.toLowerCase().includes(p))
@@ -414,7 +433,7 @@ function applyGuards(decision, goal, url, title, step, history, domMap) {
     };
   }
 
-  // Step 1 on new tab → navigate immediately
+  // Step 1 on new tab ? navigate immediately
   if (step === 1 && isSystemPage) {
     // If the goal is a search task, jump directly to the search URL
     const searchUrl = buildSearchUrl(goal);
@@ -460,7 +479,7 @@ function applyGuards(decision, goal, url, title, step, history, domMap) {
     }
   }
 
-  // Premature done guard — need minimum steps based on task type
+  // Premature done guard � need minimum steps based on task type
   if (decision.action === 'done') {
     const isSearchTask = /search|find|look for|query/i.test(goal);
     const minSteps = isSearchTask ? 3 : 2;
@@ -476,7 +495,7 @@ function applyGuards(decision, goal, url, title, step, history, domMap) {
     }
   }
 
-  // Comprehensive done validation — rejects any thought that isn't a genuine completion summary
+  // Comprehensive done validation � rejects any thought that isn't a genuine completion summary
   if (decision.action === 'done') {
     if (!validateDoneAction(decision, goal, url, history)) {
       // Figure out the best recovery action
@@ -521,65 +540,66 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
   const MAX_DOM  = 3200;
   const unmappable = domMap === 'UNMAPPABLE' || domMap === 'EMPTY';
   const trimmedDom = !unmappable && domMap.length > MAX_DOM
-    ? domMap.substring(0, MAX_DOM) + '\n… [DOM truncated — use scroll to see more elements]'
+    ? domMap.substring(0, MAX_DOM) + '\n� [DOM truncated � use scroll to see more elements]'
     : domMap;
 
   const hist = history.slice(-8).map(h =>
     '  Step ' + h.step + ': [' + h.action.toUpperCase() + '] ' +
     (h.value ? '"' + h.value.substring(0, 50) + '"' : '') +
     (h.element_id !== null && h.element_id !== undefined ? ' elem=' + h.element_id : '') +
-    ' — ' + (h.success ? '✓ ok' : '✗ failed') +
+    ' � ' + (h.success ? '? ok' : '? failed') +
     ' | ' + h.thought.substring(0, 80)
-  ).join('\n') || '  (none — this is step 1)';
+  ).join('\n') || '  (none � this is step 1)';
 
   const domSection = unmappable
-    ? '⚠ PAGE STATUS: Not accessible (new tab / browser page).\n→ You MUST use "navigate" immediately. Do NOT use click or type.'
+    ? '? PAGE STATUS: Not accessible (new tab / browser page).\n? You MUST use "navigate" immediately. Do NOT use click or type.'
     : 'INTERACTIVE ELEMENTS (use element_id numbers from this list only):\n' + trimmedDom;
 
-  // Site-specific hints — greatly improve accuracy on popular sites
+  // Site-specific hints � greatly improve accuracy on popular sites
   const siteHints = getSiteHints(currentUrl);
 
-  // Goal-completion hint — tells the LLM exactly what "done" looks like for this task
+  // Goal-completion hint � tells the LLM exactly what "done" looks like for this task
   const completionHint = buildCompletionHint(goal, currentUrl);
 
-  const prompt = 'You are COMET, an autonomous AI browser agent. Complete web tasks step by step.\n\n' +
-    '━━━ CURRENT PAGE ━━━\n' +
+  const prompt = 'You are ZANYSURF, an autonomous AI browser agent. Complete web tasks step by step.\n\n' +
+    '??? CURRENT PAGE ???\n' +
     'URL:   ' + currentUrl + '\n' +
+      (globalMemoryContext ? globalMemoryContext + '\n\n' : '') +
     'TITLE: ' + pageTitle + '\n' +
     'STEP:  ' + stepNum + ' of 30\n\n' +
     domSection + '\n\n' +
-    (siteHints ? '━━━ SITE HINTS ━━━\n' + siteHints + '\n\n' : '') +
-    '━━━ STEP HISTORY ━━━\n' +
+    (siteHints ? '??? SITE HINTS ???\n' + siteHints + '\n\n' : '') +
+    '??? STEP HISTORY ???\n' +
     hist + '\n\n' +
-    '━━━ GOAL ━━━\n' +
+    '??? GOAL ???\n' +
     goal + '\n\n' +
-    '━━━ TASK COMPLETE WHEN ━━━\n' +
+    '??? TASK COMPLETE WHEN ???\n' +
     completionHint + '\n\n' +
-    '━━━ AVAILABLE ACTIONS ━━━\n' +
-    '• navigate  — Load URL. value="https://..."\n' +
-    '• click     — Click element. element_id=NUMBER\n' +
-    '• type      — Type text. element_id=NUMBER, value="text"\n' +
-    '• key       — Press key. element_id=NUMBER or null, value="Enter"|"Tab"|"Escape"|"ArrowDown"\n' +
-    '• scroll    — Scroll. value="down"|"up"|"top"\n' +
-    '• hover     — Hover. element_id=NUMBER\n' +
-    '• select    — Pick dropdown. element_id=NUMBER, value="option text"\n' +
-    '• wait      — Wait. value="2000" (ms)\n' +
-    '• done      — ONLY when goal is 100% confirmed complete.\n\n' +
-    '━━━ RULES ━━━\n' +
+    '??? AVAILABLE ACTIONS ???\n' +
+    '� navigate  � Load URL. value="https://..."\n' +
+    '� click     � Click element. element_id=NUMBER\n' +
+    '� type      � Type text. element_id=NUMBER, value="text"\n' +
+    '� key       � Press key. element_id=NUMBER or null, value="Enter"|"Tab"|"Escape"|"ArrowDown"\n' +
+    '� scroll    � Scroll. value="down"|"up"|"top"\n' +
+    '� hover     � Hover. element_id=NUMBER\n' +
+    '� select    � Pick dropdown. element_id=NUMBER, value="option text"\n' +
+    '� wait      � Wait. value="2000" (ms)\n' +
+    '� done      � ONLY when goal is 100% confirmed complete.\n\n' +
+    '??? RULES ???\n' +
     '1. Be DECISIVE. Choose ONE concrete action. Never describe what could/should happen.\n' +
     '2. "thought" = confident present-tense: "I see X, so I will Y." Max 2 sentences.\n' +
     '3. "done" means THE TASK IS VISIBLY FINISHED on the current page RIGHT NOW.\n' +
     '4. NEVER use "done" if your thought describes a page element, button, or next action.\n' +
     '5. NEVER use "done" if your thought uses words like: could, should, might, consider, perhaps, next, element, visible, button, click, type, navigate.\n' +
     '6. VALID "done" thought example: "I have navigated to YouTube and the search results for lo-fi music are now displayed on screen."\n' +
-    '7. INVALID "done" thought example: "The search button is currently visible and could be the next action." — this is NOT done, take the action!\n' +
+    '7. INVALID "done" thought example: "The search button is currently visible and could be the next action." � this is NOT done, take the action!\n' +
     '8. Step 1: if not on the right site, navigate there immediately.\n' +
     '9. After typing in a search box, press key "Enter" on the VERY NEXT step.\n' +
-    '10. Only use element_id numbers from the list above — never invent them.\n' +
+    '10. Only use element_id numbers from the list above � never invent them.\n' +
     '11. If a step failed, try a different element_id or navigate to a direct search URL.\n' +
     '12. Never repeat the same failed action+element_id.\n' +
     '13. Scroll down to reveal more elements if the target is not visible.\n\n' +
-    '━━━ RESPOND IN JSON ONLY — NO markdown, NO code fences, NO extra text ━━━\n' +
+    '??? RESPOND IN JSON ONLY � NO markdown, NO code fences, NO extra text ???\n' +
     'Example response:\n' +
     '{"thought":"I see the YouTube homepage. I will navigate directly to the search results for lo-fi music.","action":"navigate","element_id":null,"value":"https://www.youtube.com/results?search_query=lo-fi+music","is_complete":false}\n\n' +
     'Your response must be exactly one JSON object:\n' +
@@ -596,7 +616,7 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
 }
 
 // =============================================================================
-// OLLAMA — supports /api/chat (new) and /api/generate (legacy)
+// OLLAMA � supports /api/chat (new) and /api/generate (legacy)
 // =============================================================================
 async function callOllama(prompt, settings) {
   const baseUrl = (settings.ollamaUrl || 'http://localhost:11434').replace(/\/$/, '');
@@ -624,7 +644,7 @@ async function callOllama(prompt, settings) {
       body: JSON.stringify({
         model,
         messages: [
-          { role: 'system', content: 'You are COMET, a precise browser automation agent. Always respond with valid JSON only. Never include markdown, code fences, or explanation outside the JSON object.' },
+          { role: 'system', content: 'You are ZANYSURF, a precise browser automation agent. Always respond with valid JSON only. Never include markdown, code fences, or explanation outside the JSON object.' },
           { role: 'user', content: prompt }
         ],
         stream: false,
@@ -670,7 +690,7 @@ async function callOllama(prompt, settings) {
 // =============================================================================
 async function callGemini(prompt, settings) {
   const key = settings.apiKey;
-  if (!key) throw new Error('Gemini API key not set. Open ⚙ Settings.');
+  if (!key) throw new Error('Gemini API key not set. Open ? Settings.');
 
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + key;
   const res = await fetch(url, {
@@ -757,7 +777,7 @@ function checkGoalSatisfied(goal, url, title, history, steps) {
       if (isSearchGoal) {
         if (steps_ < 3) return false;
         const searchUrlPatterns = ['search', 'q=', 'query=', 'results', 's?k=', '/search/', 'search_query', 'find='];
-        // URL must confirm search results are being shown — not just the site homepage
+        // URL must confirm search results are being shown � not just the site homepage
         if (searchUrlPatterns.some(p => ul.includes(p))) return true;
         // Also check history for a prior navigate to a search URL
         const histSearched = history.some(h =>
@@ -766,7 +786,7 @@ function checkGoalSatisfied(goal, url, title, history, steps) {
         );
         return histSearched;
       }
-      // Navigation-only tasks — just being on the right site is enough
+      // Navigation-only tasks � just being on the right site is enough
       // But require the URL to NOT be a generic browser page and steps >= 2
       if (steps_ >= 2 && ul.includes(domain)) return true;
       return false;
@@ -778,7 +798,7 @@ function checkGoalSatisfied(goal, url, title, history, steps) {
 }
 
 // =============================================================================
-// SITE-SPECIFIC HINTS — injected into LLM prompt for popular sites
+// SITE-SPECIFIC HINTS � injected into LLM prompt for popular sites
 // =============================================================================
 function getSiteHints(url) {
   const u = url.toLowerCase();
@@ -871,7 +891,7 @@ function buildCompletionHint(goal, currentUrl) {
 
 // =============================================================================
 // DIRECT SEARCH URL BUILDER
-// Constructs a search URL immediately from the goal — no DOM interaction needed.
+// Constructs a search URL immediately from the goal � no DOM interaction needed.
 // Returns null if no search intent is detected.
 // =============================================================================
 function buildSearchUrl(goal) {
@@ -1023,3 +1043,4 @@ async function waitForTabReady(tabId) {
     });
   });
 }
+

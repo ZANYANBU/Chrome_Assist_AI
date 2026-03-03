@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "COMET AI Browser Agent",
-  "short_name": "COMET",
-  "version": "4.0",
+  "name": "ZANYSURF Browser Agent",
+  "short_name": "ZANYSURF",
+  "author": "Anbuchelvan Valavan",
+  "version": "1.0",
   "description": "Autonomous AI browser agent powered by local Ollama or Gemini. Chain-of-thought reasoning, step-by-step navigation, and full browser control.",
   "icons": {
     "16":  "icons/icon16.png",
@@ -15,11 +16,14 @@
     "storage",
     "tabs",
     "contextMenus",
-    "notifications"
+    "notifications",
+    "sidePanel"
   ],
+  "side_panel": {
+    "default_path": "popup.html"
+  },
   "action": {
-    "default_popup": "popup.html",
-    "default_title": "COMET AI Agent",
+    "default_title": "ZANYSURF AI Agent",
     "default_icon": {
       "16":  "icons/icon16.png",
       "48":  "icons/icon48.png",
@@ -53,3 +57,4 @@
     "extension_pages": "script-src 'self'; object-src 'self'"
   }
 }
+
