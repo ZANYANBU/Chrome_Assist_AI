@@ -94,6 +94,15 @@ async function runAgentLoop(userGoal) {
       const currentTitle = tab.title || '';
       const isSystemPage = isChromePage(currentUrl);
 
+      // Early completion check: if current page already satisfies the goal, stop immediately.
+      if (steps >= 2 && checkGoalSatisfied(userGoal, currentUrl, currentTitle, actionHistory, steps)) {
+        const completionMsg = 'Goal accomplished. Reached ' + currentUrl + ' as required.';
+        broadcast({ action: 'AGENT_COMPLETE', result: completionMsg, steps: steps - 1 });
+        await saveTaskHistory(userGoal, steps - 1, true);
+        agentActive = false;
+        break;
+      }
+
       broadcast({ action: 'AGENT_PAGE_INFO', url: currentUrl, title: currentTitle, step: steps });
 
       // 3. Build DOM map
@@ -118,33 +127,38 @@ async function runAgentLoop(userGoal) {
         'provider', 'apiKey', 'ollamaUrl', 'ollamaModel'
       ]);
 
-      broadcast({ action: 'AGENT_THINKING', step: steps });
-
-      // 5. Ask LLM for next action
       let decision;
-      try {
-        decision = await getNextAction(
-          userGoal, domMap, actionHistory, settings,
-          currentUrl, currentTitle, steps
-        );
-      } catch (e) {
-        broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'LLM error, retrying�' });
-        await sleep(2000);
+
+      // 5. Fast path: direct navigation goals should act instantly
+      decision = getFastPathDecision(userGoal, currentUrl, steps, actionHistory);
+
+      // 6. Ask LLM for next action when fast path does not apply
+      if (!decision) {
+        broadcast({ action: 'AGENT_THINKING', step: steps });
         try {
           decision = await getNextAction(
             userGoal, domMap, actionHistory, settings,
             currentUrl, currentTitle, steps
           );
-        } catch (e2) {
-          broadcast({ action: 'AGENT_ERROR', error: 'LLM failed: ' + e2.message });
-          break;
+        } catch (e) {
+          broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'LLM error, retrying�' });
+          await sleep(2000);
+          try {
+            decision = await getNextAction(
+              userGoal, domMap, actionHistory, settings,
+              currentUrl, currentTitle, steps
+            );
+          } catch (e2) {
+            broadcast({ action: 'AGENT_ERROR', error: 'LLM failed: ' + e2.message });
+            break;
+          }
         }
       }
 
-      // 6. Safety guards
+      // 7. Safety guards
       decision = applyGuards(decision, userGoal, currentUrl, currentTitle, steps, actionHistory, domMap);
 
-      // 7. Broadcast thought
+      // 8. Broadcast thought
       broadcast({
         action:     'AGENT_LOG',
         step:       steps,
@@ -157,7 +171,7 @@ async function runAgentLoop(userGoal) {
         dom_count:  countDomElements(domMap)
       });
 
-      // 8. Execute action
+      // 9. Execute action
       let execResult = { success: true, detail: '' };
 
       switch (decision.action) {
@@ -620,9 +634,64 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
 // =============================================================================
 // OLLAMA � supports /api/chat (new) and /api/generate (legacy)
 // =============================================================================
+const OLLAMA_REQUEST_TIMEOUT_MS = 25000;
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = OLLAMA_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function listOllamaModels(baseUrl) {
+  try {
+    const res = await fetchWithTimeout(baseUrl + '/api/tags', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' }
+    }, 6000);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data?.models || []).map(m => m?.name).filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+}
+
+function buildOllamaCandidates(requestedModel, installedModels) {
+  const preferred = [
+    requestedModel,
+    'llama3.2:latest',
+    'llama3:latest',
+    'llama3',
+    'mistral:latest',
+    'mistral',
+    'llama3.1:latest',
+    'llama3.1'
+  ].filter(Boolean);
+
+  const installedSet = new Set(installedModels || []);
+  const candidates = [];
+
+  for (const model of preferred) {
+    if (installedSet.has(model)) candidates.push(model);
+  }
+  for (const model of installedModels || []) {
+    if (!candidates.includes(model)) candidates.push(model);
+  }
+
+  if (!candidates.length && requestedModel) candidates.push(requestedModel);
+  if (!candidates.length) candidates.push('llama3');
+  return candidates;
+}
+
 async function callOllama(prompt, settings) {
   const baseUrl = (settings.ollamaUrl || 'http://localhost:11434').replace(/\/$/, '');
-  const model   = settings.ollamaModel || 'llama3.2:latest';
+  const requestedModel = (settings.ollamaModel || '').trim() || 'llama3';
+  const installedModels = await listOllamaModels(baseUrl);
+  const modelCandidates = buildOllamaCandidates(requestedModel, installedModels);
 
   const jsonSchema = {
     type: 'object',
@@ -637,53 +706,84 @@ async function callOllama(prompt, settings) {
   };
 
   let rawText = '';
+  let lastError = '';
 
-  // Try /api/chat first (Ollama >= 0.1.14)
-  try {
-    const res = await fetch(baseUrl + '/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: 'You are ZANYSURF, a precise browser automation agent. Always respond with valid JSON only. Never include markdown, code fences, or explanation outside the JSON object.' },
-          { role: 'user', content: prompt }
-        ],
-        stream: false,
-        format: jsonSchema,
-        options: { temperature: 0, num_predict: 800 }
-      })
-    });
-    if (res.ok) {
-      const data = await res.json();
-      rawText = data?.message?.content || data?.response || '';
-    }
-  } catch (_) {}
+  for (const model of modelCandidates) {
+    // Try /api/chat first (Ollama >= 0.1.14)
+    try {
+      const res = await fetchWithTimeout(baseUrl + '/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: 'You are ZANYSURF, a precise browser automation agent. Always respond with valid JSON only. Never include markdown, code fences, or explanation outside the JSON object.' },
+            { role: 'user', content: prompt }
+          ],
+          stream: false,
+          format: jsonSchema,
+          options: { temperature: 0, num_predict: 800 }
+        })
+      });
 
-  // Fallback to /api/generate
-  if (!rawText) {
-    const res = await fetch(baseUrl + '/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        prompt,
-        stream: false,
-        format: jsonSchema,
-        options: { temperature: 0, num_predict: 800 }
-      })
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error('Ollama ' + res.status + ': ' + err.substring(0, 200));
+      if (res.ok) {
+        const data = await res.json();
+        rawText = data?.message?.content || data?.response || '';
+      } else {
+        const err = await res.text();
+        lastError = 'Ollama ' + res.status + ': ' + err.substring(0, 200);
+      }
+    } catch (e) {
+      lastError = e?.message || 'Ollama /api/chat request failed';
     }
-    const data = await res.json();
-    rawText = data?.response || '';
+
+    // Fallback to /api/generate
+    if (!rawText) {
+      try {
+        const res = await fetchWithTimeout(baseUrl + '/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            prompt,
+            stream: false,
+            format: jsonSchema,
+            options: { temperature: 0, num_predict: 800 }
+          })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          rawText = data?.response || '';
+        } else {
+          const err = await res.text();
+          lastError = 'Ollama ' + res.status + ': ' + err.substring(0, 200);
+        }
+      } catch (e) {
+        lastError = e?.message || 'Ollama /api/generate request failed';
+      }
+    }
+
+    if (rawText) {
+      if (settings.ollamaModel !== model) {
+        chrome.storage.local.set({ ollamaModel: model }).catch(() => {});
+      }
+      break;
+    }
   }
 
-  if (!rawText) throw new Error('Ollama returned an empty response.');
+  if (!rawText) {
+    throw new Error(
+      (lastError || 'Ollama returned an empty response.') +
+      ' | Try: ollama pull llama3'
+    );
+  }
   const parsed = extractJSON(rawText);
-  if (!parsed) throw new Error('Could not parse JSON from Ollama: ' + rawText.substring(0, 150));
+  if (!parsed) {
+    throw new Error(
+      'Could not parse JSON from Ollama: ' + rawText.substring(0, 150) +
+      (lastError ? ' | Last error: ' + lastError : '')
+    );
+  }
   return parsed;
 }
 
@@ -777,7 +877,7 @@ function checkGoalSatisfied(goal, url, title, history, steps) {
     if (gl.includes(keyword) && ul.includes(domain)) {
       // Search tasks: need search URL AND at least 3 steps (navigate + search action + results)
       if (isSearchGoal) {
-        if (steps_ < 3) return false;
+        if (steps_ < 2) return false;
         const searchUrlPatterns = ['search', 'q=', 'query=', 'results', 's?k=', '/search/', 'search_query', 'find='];
         // URL must confirm search results are being shown � not just the site homepage
         if (searchUrlPatterns.some(p => ul.includes(p))) return true;
@@ -797,6 +897,57 @@ function checkGoalSatisfied(goal, url, title, history, steps) {
   const rawUrl = goal.match(/https?:\/\/[^\s]+/);
   if (rawUrl) { try { return ul.includes(new URL(rawUrl[0]).hostname); } catch (_) {} }
   return false;
+}
+
+function getFastPathDecision(goal, currentUrl, step, history) {
+  if (step !== 1 || (history && history.length > 0)) return null;
+
+  const rawGoal = (goal || '').trim();
+  const gl = rawGoal.toLowerCase();
+  if (!gl) return null;
+
+  const directUrlMatch = rawGoal.match(/https?:\/\/[^\s]+/i);
+  if (directUrlMatch) {
+    const targetUrl = directUrlMatch[0];
+    if (!currentUrl || !currentUrl.startsWith(targetUrl)) {
+      return {
+        thought: 'I will navigate directly to the requested URL first.',
+        action: 'navigate',
+        element_id: null,
+        value: targetUrl,
+        is_complete: false
+      };
+    }
+  }
+
+  const siteMap = [
+    { keys: ['youtube'], url: 'https://www.youtube.com' },
+    { keys: ['amazon'], url: 'https://www.amazon.com' },
+    { keys: ['reddit'], url: 'https://www.reddit.com' },
+    { keys: ['github'], url: 'https://github.com' },
+    { keys: ['hacker news', 'hn'], url: 'https://news.ycombinator.com' },
+    { keys: ['google'], url: 'https://www.google.com' },
+    { keys: ['microsoft partner', 'partner.microsoft.com'], url: 'https://partner.microsoft.com' }
+  ];
+
+  const navigationIntent = /(open|go to|visit|navigate to|take me to|launch)/i.test(gl);
+  if (!navigationIntent) return null;
+
+  for (const site of siteMap) {
+    if (site.keys.some(key => gl.includes(key))) {
+      if (!currentUrl || !currentUrl.includes(new URL(site.url).hostname)) {
+        return {
+          thought: 'I will navigate to the requested site first.',
+          action: 'navigate',
+          element_id: null,
+          value: site.url,
+          is_complete: false
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 // =============================================================================
