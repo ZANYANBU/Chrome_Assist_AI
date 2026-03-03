@@ -223,10 +223,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       case 'AGENT_COMPLETE': {
         removeThinking();
         setIdle();
-        const n = Number(msg.steps);
-        const stepLabel = n > 0
-          ? n + ' step' + (n !== 1 ? 's' : '')
-          : 'a few steps';
+        const n = Math.max(Number(msg.steps) || 1, 1);
+        const stepLabel = n + ' step' + (n !== 1 ? 's' : '');
         appendCard('success',
           '✦ Done in ' + stepLabel,
           msg.result || 'Task completed successfully.'

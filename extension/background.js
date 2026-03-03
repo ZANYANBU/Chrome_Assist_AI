@@ -275,6 +275,91 @@ async function runAgentLoop(userGoal) {
 }
 
 // =============================================================================
+// DONE ACTION VALIDATOR
+// Strictly checks whether a "done" decision is genuinely a completion.
+// Returns true only if the thought is a real accomplishment summary and the
+// current page / history confirms the task is actually finished.
+// =============================================================================
+function validateDoneAction(decision, goal, currentUrl, history) {
+  const thought = (decision.thought || '').toLowerCase();
+  const gl      = goal.toLowerCase();
+  const ul      = currentUrl.toLowerCase();
+
+  // 1. Thought must have meaningful content
+  if (decision.thought.length < 25) return false;
+
+  // 2. Thought must NOT describe a page element or suggest a next action
+  //    These are dead giveaways that the LLM is confused about what "done" means.
+  const badPhrases = [
+    'could be', 'is currently', 'currently visible', 'is visible',
+    'next action', 'next single', 'the element', 'button with id',
+    'element with id', 'element id', 'id \'', 'might be', 'next step',
+    'you could', 'you should', 'consider', 'perhaps', 'suggest',
+    'try ', 'would be', 'needs to', 'need to', 'should be',
+    'click on', 'type into', 'navigate to', 'you can',
+    'to complete', 'to finish', 'to accomplish', 'action to take',
+    'action would be', 'further action', 'could also',
+    'is the next', 'takes you', 'will take',
+  ];
+  if (badPhrases.some(p => thought.includes(p))) return false;
+
+  // 3. Thought must NOT be purely forward-looking (future tense about the task)
+  //    A completion thought describes what WAS done, not what TO do.
+  const futureVerbs = [
+    'i will ', 'i need to ', 'i should ', 'i can ', 'i must ',
+    'we need to', 'the agent should', 'the next',
+  ];
+  if (futureVerbs.some(v => thought.startsWith(v) || thought.includes('. ' + v))) return false;
+
+  // 4. For search tasks: current URL must confirm the search was performed
+  const isSearchTask = /search|find|look for|query|browse/i.test(gl);
+  if (isSearchTask) {
+    const searchUrlPatterns = ['search', 'q=', 'query=', 'results', 's?k=', '/search/', 'find='];
+    const urlConfirmsSearch = searchUrlPatterns.some(p => ul.includes(p));
+    // Also check history — maybe we navigated to a search URL in a prior step
+    const historyConfirmsSearch = history.some(h =>
+      h.action === 'navigate' && h.value &&
+      searchUrlPatterns.some(p => h.value.toLowerCase().includes(p))
+    );
+    if (!urlConfirmsSearch && !historyConfirmsSearch) return false;
+
+    // Verify we are on the right site
+    const siteChecks = [
+      ['youtube', 'youtube.com'], ['github', 'github.com'], ['amazon', 'amazon.com'],
+      ['google', 'google.com'],   ['reddit', 'reddit.com'], ['stackoverflow', 'stackoverflow.com'],
+      ['wikipedia', 'wikipedia.org'], ['npm', 'npmjs.com'], ['twitter', 'twitter.com'],
+      ['linkedin', 'linkedin.com'], ['bing', 'bing.com'], ['spotify', 'spotify.com'],
+    ];
+    for (const [keyword, domain] of siteChecks) {
+      if (gl.includes(keyword)) {
+        const onSite = ul.includes(domain) ||
+          history.some(h => h.action === 'navigate' && h.value && h.value.includes(domain));
+        if (!onSite) return false;
+      }
+    }
+  }
+
+  // 5. For navigation goals: must be on the right site
+  const navSiteChecks = [
+    ['youtube', 'youtube.com'], ['github', 'github.com'], ['amazon', 'amazon.com'],
+    ['google', 'google.com'],   ['reddit', 'reddit.com'], ['stackoverflow', 'stackoverflow.com'],
+    ['wikipedia', 'wikipedia.org'], ['npm', 'npmjs.com'], ['twitter', 'twitter.com'],
+    ['linkedin', 'linkedin.com'], ['hacker news', 'ycombinator.com'], ['netflix', 'netflix.com'],
+  ];
+  for (const [keyword, domain] of navSiteChecks) {
+    if (gl.includes(keyword) && !ul.includes(domain)) {
+      // Allow if history shows we navigated there
+      const visited = history.some(h =>
+        h.action === 'navigate' && h.value && h.value.includes(domain)
+      );
+      if (!visited) return false;
+    }
+  }
+
+  return true;
+}
+
+// =============================================================================
 // SAFETY GUARDS
 // =============================================================================
 function applyGuards(decision, goal, url, title, step, history, domMap) {
@@ -338,25 +423,42 @@ function applyGuards(decision, goal, url, title, step, history, domMap) {
     }
   }
 
-  // Premature done guard
-  if (decision.action === 'done' && history.length < 2) {
-    const targetUrl = extractTargetUrl(goal);
-    return {
-      thought: 'I have not taken enough steps to complete this goal. I need to continue.',
-      action: targetUrl ? 'navigate' : 'scroll',
-      value: targetUrl || 'down',
-      element_id: null,
-      is_complete: false
-    };
+  // Premature done guard — need minimum steps based on task type
+  if (decision.action === 'done') {
+    const isSearchTask = /search|find|look for|query/i.test(goal);
+    const minSteps = isSearchTask ? 3 : 2;
+    if (history.length < minSteps) {
+      const targetUrl = extractTargetUrl(goal);
+      return {
+        thought: 'Too few steps taken to complete this goal. Continuing task.',
+        action: targetUrl ? 'navigate' : 'scroll',
+        value: targetUrl || 'down',
+        element_id: null,
+        is_complete: false
+      };
+    }
   }
 
-  // Weak / indecisive done guard: if thought contains "consider", "should", "try", "could", it's not done
+  // Comprehensive done validation — rejects any thought that isn't a genuine completion summary
   if (decision.action === 'done') {
-    const t = (decision.thought || '').toLowerCase();
-    const hedgeWords = ['consider', 'you should', 'you could', 'you might', 'try using', 'perhaps', 'suggest'];
-    if (hedgeWords.some(w => t.includes(w))) {
+    if (!validateDoneAction(decision, goal, url, history)) {
+      // Figure out the best recovery action
+      const searchUrl = buildSearchUrl(goal);
+      const alreadySearched = history.some(h =>
+        (h.action === 'navigate' && h.value && (h.value.includes('search') || h.value.includes('q='))) ||
+        (h.action === 'type' && h.success)
+      );
+      if (searchUrl && !alreadySearched) {
+        return {
+          thought: 'Task is not yet complete. Navigating directly to the search results.',
+          action: 'navigate',
+          value: searchUrl,
+          element_id: null,
+          is_complete: false
+        };
+      }
       return {
-        thought: 'The previous thought was indecisive. Continuing to progress toward the goal.',
+        thought: 'Task is not yet complete. Continuing to work toward the goal.',
         action: 'scroll',
         value: 'down',
         element_id: null,
@@ -400,6 +502,9 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
   // Site-specific hints — greatly improve accuracy on popular sites
   const siteHints = getSiteHints(currentUrl);
 
+  // Goal-completion hint — tells the LLM exactly what "done" looks like for this task
+  const completionHint = buildCompletionHint(goal, currentUrl);
+
   const prompt = 'You are COMET, an autonomous AI browser agent. Complete web tasks step by step.\n\n' +
     '━━━ CURRENT PAGE ━━━\n' +
     'URL:   ' + currentUrl + '\n' +
@@ -411,6 +516,8 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
     hist + '\n\n' +
     '━━━ GOAL ━━━\n' +
     goal + '\n\n' +
+    '━━━ TASK COMPLETE WHEN ━━━\n' +
+    completionHint + '\n\n' +
     '━━━ AVAILABLE ACTIONS ━━━\n' +
     '• navigate  — Load URL. value="https://..."\n' +
     '• click     — Click element. element_id=NUMBER\n' +
@@ -422,19 +529,22 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
     '• wait      — Wait. value="2000" (ms)\n' +
     '• done      — ONLY when goal is 100% confirmed complete.\n\n' +
     '━━━ RULES ━━━\n' +
-    '1. Be DECISIVE. Choose ONE action now. Never say "consider" or "you could".\n' +
-    '2. "thought" = confident first-person reasoning: "I see X, so I will Y." Max 2 sentences.\n' +
-    '3. "done" is ONLY for tasks that are 100% visibly complete on the current page.\n' +
-    '4. When action=done, "thought" must state what was accomplished (not what to do).\n' +
-    '5. Step 1: if not on the right site, navigate there immediately.\n' +
-    '6. After typing in a search box, ALWAYS press key "Enter" on the next step.\n' +
-    '7. Only use element_id numbers from the list above — never invent them.\n' +
-    '8. If a step failed, try a different element_id or use "navigate" + a search URL instead.\n' +
-    '9. Never repeat the same action+element_id that already failed.\n' +
-    '10. Scroll to reveal more elements if the target element is not yet visible.\n\n' +
+    '1. Be DECISIVE. Choose ONE concrete action. Never describe what could/should happen.\n' +
+    '2. "thought" = confident present-tense: "I see X, so I will Y." Max 2 sentences.\n' +
+    '3. "done" means THE TASK IS VISIBLY FINISHED on the current page RIGHT NOW.\n' +
+    '4. NEVER use "done" if your thought describes a page element, button, or next action.\n' +
+    '5. NEVER use "done" if your thought uses words like: could, should, might, consider, perhaps, next, element, visible, button, click, type, navigate.\n' +
+    '6. VALID "done" thought example: "I have navigated to YouTube and the search results for lo-fi music are now displayed on screen."\n' +
+    '7. INVALID "done" thought example: "The search button is currently visible and could be the next action." — this is NOT done, take the action!\n' +
+    '8. Step 1: if not on the right site, navigate there immediately.\n' +
+    '9. After typing in a search box, press key "Enter" on the VERY NEXT step.\n' +
+    '10. Only use element_id numbers from the list above — never invent them.\n' +
+    '11. If a step failed, try a different element_id or navigate to a direct search URL.\n' +
+    '12. Never repeat the same failed action+element_id.\n' +
+    '13. Scroll down to reveal more elements if the target is not visible.\n\n' +
     '━━━ RESPOND IN JSON ONLY ━━━\n' +
     '{\n' +
-    '  "thought": "I see [observation]. I will [decisive action].",\n' +
+    '  "thought": "I see [observation]. I will [action].",\n' +
     '  "action": "navigate|click|type|key|scroll|hover|select|wait|done",\n' +
     '  "element_id": null_or_integer,\n' +
     '  "value": "string or null",\n' +
@@ -648,6 +758,60 @@ function getSiteHints(url) {
     return 'On npm: the search box has placeholder "Search packages". Package results are <a> tags with package names.';
   }
   return '';
+}
+
+// =============================================================================
+// COMPLETION HINT BUILDER
+// Generates a concrete, task-specific "done" description injected into the prompt.
+// This tells the LLM exactly what the page should look like when ready to call done.
+// =============================================================================
+function buildCompletionHint(goal, currentUrl) {
+  const gl = goal.toLowerCase();
+  const ul = currentUrl.toLowerCase();
+
+  const isSearch  = /search|find|look for|query/i.test(gl);
+  const isOpen    = /open|go to|navigate|visit/i.test(gl) && !isSearch;
+  const isClick   = /click|press|tap/i.test(gl);
+  const isType    = /type|enter|fill|write/i.test(gl);
+  const isScroll  = /scroll|read|view/i.test(gl);
+
+  // Extract site name from common patterns
+  const siteMatch = gl.match(/(?:on|to|at|open)\s+([\w\s]+?)(?:\s+and|\s+for|\s*$)/i);
+  const siteName  = siteMatch ? siteMatch[1].trim() : '';
+
+  if (isSearch) {
+    const queryMatch = goal.match(/(?:for|about)\s+["']?(.+?)["']?(?:\s+on|\s+in|\s+at|$)/i);
+    const query = queryMatch ? queryMatch[1].trim() : 'the topic';
+    const site  = siteName || 'the site';
+    return `The search results page for "${query}" is visible on ${site}. ` +
+           `The URL contains "search", "q=", or similar. ` +
+           `Result items/videos/links are displayed on screen. ` +
+           `Example done thought: "I have searched for ${query} on ${site} and the results page is now showing."`;
+  }
+
+  if (isOpen) {
+    const site = siteName || 'the website';
+    return `The browser has loaded ${site}. ` +
+           `The page title/URL confirms the correct site. ` +
+           `Example done thought: "I have navigated to ${site} and the page has loaded successfully."`;
+  }
+
+  if (isClick) {
+    return `The button/link has been clicked and the resulting page or action is visible. ` +
+           `Example done thought: "I clicked the requested element and the page responded as expected."`;
+  }
+
+  if (isType) {
+    return `The text has been entered into the field and any required submission has been performed. ` +
+           `Example done thought: "I have typed the required text and submitted the form / pressed Enter."`;
+  }
+
+  if (isScroll) {
+    return `The requested content is now visible on screen after scrolling. ` +
+           `Example done thought: "I scrolled down and the content requested is now visible on screen."`;
+  }
+
+  return `The goal "${goal}" is fully completed and the result is visible on the current page.`;
 }
 
 // =============================================================================
