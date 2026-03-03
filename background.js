@@ -49,7 +49,9 @@ async function runAgentLoop(userGoal) {
   agentAbort    = false;
   actionHistory = [];
   sessionGoal   = userGoal;
-  let steps     = 0;
+  let steps       = 0;
+  let stuckCount  = 0;       // consecutive identical action fingerprints
+  let lastFingerprint = ''; // action+value+element_id hash for loop detection
   const MAX_STEPS = 30;
 
   broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'Agent starting…' });
@@ -177,6 +179,11 @@ async function runAgentLoop(userGoal) {
             const r = await chrome.tabs.sendMessage(tab.id, { action: 'EXECUTE', command: decision });
             execResult = { success: !!(r && r.success), detail: r?.result || r?.error || '' };
           } catch (e) { execResult = { success: false, detail: e.message }; }
+          // Screenshot after key/click so the LLM sees results (e.g. search loaded after Enter)
+          if (execResult.success && (decision.action === 'key' || decision.action === 'click' || decision.action === 'type')) {
+            await sleep(900);
+            captureAndBroadcast(tab.id, steps);
+          }
           break;
         }
 
@@ -238,16 +245,43 @@ async function runAgentLoop(userGoal) {
         success:    execResult.success
       });
 
-      // 10b. Auto-complete: check if goal is clearly satisfied after navigation
-      if (execResult.success &&
-          decision.action === 'navigate' &&
-          steps >= 2 &&
-          checkGoalSatisfied(userGoal, decision.value || '', currentTitle, actionHistory, steps)) {
-        const completionMsg = 'Goal accomplished. Navigated to ' + (decision.value || currentUrl) + ' as required.';
-        broadcast({ action: 'AGENT_COMPLETE', result: completionMsg, steps });
-        await saveTaskHistory(userGoal, steps, true);
-        agentActive = false;
-        break;
+      // 10b. Stuck / infinite-loop detection
+      // If the agent keeps taking the exact same action + value + element_id, it is stuck.
+      const fingerprint = decision.action + '|' + (decision.value || '') + '|' + (decision.element_id ?? '');
+      if (fingerprint === lastFingerprint) {
+        stuckCount++;
+      } else {
+        stuckCount = 0;
+        lastFingerprint = fingerprint;
+      }
+      if (stuckCount >= 2) {
+        // 2 identical steps in a row → force an escape
+        stuckCount = 0;
+        lastFingerprint = '';
+        const escapeUrl = buildSearchUrl(userGoal);
+        const escapeDecision = escapeUrl
+          ? { thought: 'I am stuck repeating the same action. Navigating directly to the search results URL to break the loop.', action: 'navigate', value: escapeUrl, element_id: null, is_complete: false }
+          : { thought: 'I am stuck. Scrolling down to reveal new content.', action: 'scroll', value: 'down', element_id: null, is_complete: false };
+        broadcast({ action: 'AGENT_STATUS', status: 'running', message: '⚠ Loop detected — escaping…' });
+        await chrome.tabs.sendMessage(tab.id, { action: 'EXECUTE', command: escapeDecision }).catch(() => {});
+        if (escapeDecision.action === 'navigate') {
+          await chrome.tabs.update(tab.id, { url: escapeDecision.value });
+          await waitForTabReady(tab.id);
+        }
+        continue;
+      }
+
+      // 10c. Auto-complete: re-query tab for real post-redirect URL, then check satisfaction
+      if (execResult.success && decision.action === 'navigate' && steps >= 2) {
+        const freshTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        const realUrl   = freshTabs[0]?.url || decision.value || '';
+        if (checkGoalSatisfied(userGoal, realUrl, freshTabs[0]?.title || currentTitle, actionHistory, steps)) {
+          const completionMsg = 'Goal accomplished. Reached ' + realUrl + ' as required.';
+          broadcast({ action: 'AGENT_COMPLETE', result: completionMsg, steps });
+          await saveTaskHistory(userGoal, steps, true);
+          agentActive = false;
+          break;
+        }
       }
 
       // 11. Check completion
@@ -408,12 +442,13 @@ function applyGuards(decision, goal, url, title, step, history, domMap) {
   // Even mid-task: if next step is "navigate to X then search", shortcut to search URL
   if (step <= 2 && (decision.action === 'navigate' || decision.action === 'click')) {
     const searchUrl = buildSearchUrl(goal);
-    if (searchUrl && !history.some(h => h.url && h.url.includes('search'))) {
-      // Only shortcut if we haven't already reached a search page
-      const alreadySearched = history.some(h =>
-        h.action === 'navigate' && h.value && h.value.includes('search')
+    if (searchUrl) {
+      // Only shortcut if we haven't already tried this exact search URL
+      const alreadyTriedSearch = history.some(h =>
+        h.action === 'navigate' && h.value &&
+        (h.value.includes('search') || h.value.includes('q=') || h.value.includes('search_query') || h.value === searchUrl)
       );
-      if (!alreadySearched) {
+      if (!alreadyTriedSearch) {
         return {
           thought: 'I can skip typing in a search box and navigate directly to the search results URL: ' + searchUrl,
           action: 'navigate',
