@@ -512,6 +512,25 @@ if (!window.__ZANYSURF_agent_initialized) {
         return JSON.stringify(extracted);
       }
 
+      case 'extract_text': {
+        const cleanText = extractCleanArticleText();
+        const headings = [...document.querySelectorAll('h1, h2, h3')]
+          .map(node => (node.textContent || '').replace(/\s+/g, ' ').trim())
+          .filter(Boolean)
+          .slice(0, 40);
+        const words = cleanText ? cleanText.split(/\s+/).filter(Boolean) : [];
+        const payload = {
+          mode: 'text',
+          url: window.location.href,
+          title: document.title,
+          headings,
+          wordCount: words.length,
+          text: cleanText.substring(0, 24000),
+          extractedAt: Date.now()
+        };
+        return JSON.stringify(payload);
+      }
+
       case 'upload_file': {
         const target = el || elementMap[command.element_id];
         if (!target) throw new Error('upload_file target not found');

@@ -1612,6 +1612,34 @@ async function runAgentLoop(userGoal, options = {}) {
           break;
         }
 
+        case 'open_gmail_compose': {
+          try {
+            const gmailUrl = buildGmailComposeUrl(decision.value);
+            await chrome.tabs.update(tab.id, { url: gmailUrl });
+            await sleep(700);
+            await waitForTabReady(tab.id);
+            execResult.detail = 'Opened Gmail compose window';
+            captureAndBroadcast(tab.id, steps);
+          } catch (e) {
+            execResult = { success: false, detail: e.message };
+          }
+          break;
+        }
+
+        case 'schedule_calendar': {
+          try {
+            const calendarUrl = buildCalendarCreateUrl(decision.value);
+            await chrome.tabs.update(tab.id, { url: calendarUrl });
+            await sleep(700);
+            await waitForTabReady(tab.id);
+            execResult.detail = 'Opened Google Calendar event editor';
+            captureAndBroadcast(tab.id, steps);
+          } catch (e) {
+            execResult = { success: false, detail: e.message };
+          }
+          break;
+        }
+
         case 'click':
         case 'click_coords':
         case 'type':
@@ -1629,14 +1657,18 @@ async function runAgentLoop(userGoal, options = {}) {
         case 'book_slot':
         case 'fill_form':
         case 'inspect_form':
+        case 'extract_text':
         case 'extract_data': {
           try {
             const r = await chrome.tabs.sendMessage(tab.id, { action: 'EXECUTE', command: decision });
             execResult = { success: !!(r && r.success), detail: r?.result || r?.error || '' };
-            if (execResult.success && decision.action === 'extract_data') {
+            if (execResult.success && (decision.action === 'extract_data' || decision.action === 'extract_text')) {
               const extracted = parseMaybeJson(execResult.detail);
               if (extracted) {
                 await upsertKnowledgeGraph(extracted).catch(() => {});
+                if (decision.action === 'extract_text') {
+                  await chrome.storage.local.set({ zanysurf_last_text_extract: extracted }).catch(() => {});
+                }
                 tabOrchestrationState.extracted[tab.id] = {
                   tabId: tab.id,
                   url: currentUrl,
@@ -2005,7 +2037,7 @@ function applyGuards(decision, goal, url, title, step, history, domMap) {
   const unmappable = domMap === 'UNMAPPABLE' || domMap === 'EMPTY';
 
   // Cannot interact with chrome:// pages
-  if (['click','type','hover','select','fill_form','inspect_form','extract_data','drag_drop','upload_file','enter_iframe','context_click','shortcut','execute_js','compose_email','book_slot','login_saved'].includes(decision.action) && unmappable) {
+  if (['click','type','hover','select','fill_form','inspect_form','extract_data','extract_text','drag_drop','upload_file','enter_iframe','context_click','shortcut','execute_js','compose_email','book_slot','login_saved'].includes(decision.action) && unmappable) {
     const targetUrl = extractTargetUrl(goal);
     return {
       thought: 'Page is unmappable. I must navigate to a website first.',
@@ -2182,6 +2214,9 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
     '� wait_tab  � Wait for a tab to load. value="tabId"\n' +
     '� activate_tab � Switch to tab when dependencies are met. value="tabId"\n' +
     '� extract_data � Extract structured data from current page. value="prices|table|emails|names"\n' +
+    '� extract_text � Extract clean readable text + headings from current page. value may be null\n' +
+    '� open_gmail_compose � Open Gmail compose with optional value JSON {to,subject,body}\n' +
+    '� schedule_calendar � Open Google Calendar event editor with optional value JSON {title,details,location,dates}\n' +
     '� synthesize � Merge extracted data from all tabs into one result. value may be null\n' +
     '� export_csv � Export extracted data to CSV file. value may be null\n' +
     '� copy_clipboard � Copy extracted CSV to clipboard. value may be null\n' +
@@ -2206,14 +2241,16 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
     '14. For compare/research tasks, use open_tabs -> wait_tab/activate_tab -> extract_data per tab -> synthesize -> export_csv/copy_clipboard.\n' +
     '15. Respect tab dependency graphs: do not activate a dependent tab before required tabs are extracted.\n' +
     '16. For forms, call inspect_form first, then fill_form, then re-check for validation errors before done.\n\n' +
-    '17. In vision mode, prefer click_coords with clear x,y values from visible UI.\n\n' +
+    '17. In vision mode, prefer click_coords with clear x,y values from visible UI.\n' +
+    '18. For Gmail tasks, use open_gmail_compose first, then compose_email/fill_form.\n' +
+    '19. For calendar tasks, use schedule_calendar first, then fill_form/book_slot.\n\n' +
     '??? RESPOND IN JSON ONLY � NO markdown, NO code fences, NO extra text ???\n' +
     'Example response:\n' +
     '{"thought":"I see the YouTube homepage. I will navigate directly to the search results for lo-fi music.","action":"navigate","element_id":null,"value":"https://www.youtube.com/results?search_query=lo-fi+music","is_complete":false}\n\n' +
     'Your response must be exactly one JSON object:\n' +
     '{\n' +
     '  "thought": "I see [observation]. I will [action].",\n' +
-    '  "action": "navigate|click|click_coords|type|key|scroll|hover|select|wait|done|new_tab|open_tabs|wait_tab|activate_tab|extract_data|synthesize|export_csv|copy_clipboard|inspect_form|fill_form|drag_drop|upload_file|enter_iframe|exit_iframe|context_click|shortcut|execute_js|compose_email|book_slot|bridge_extension|login_saved",\n' +
+    '  "action": "navigate|click|click_coords|type|key|scroll|hover|select|wait|done|new_tab|open_tabs|wait_tab|activate_tab|extract_data|extract_text|open_gmail_compose|schedule_calendar|synthesize|export_csv|copy_clipboard|inspect_form|fill_form|drag_drop|upload_file|enter_iframe|exit_iframe|context_click|shortcut|execute_js|compose_email|book_slot|bridge_extension|login_saved",\n' +
     '  "element_id": null_or_integer,\n' +
     '  "x": optional_number,\n' +
     '  "y": optional_number,\n' +
@@ -2294,7 +2331,7 @@ async function callOllama(prompt, settings) {
     required: ['thought', 'action', 'is_complete'],
     properties: {
       thought:     { type: 'string' },
-      action:      { type: 'string', enum: ['navigate','click','click_coords','type','key','scroll','hover','select','wait','done','new_tab','open_tabs','wait_tab','activate_tab','extract_data','synthesize','export_csv','copy_clipboard','inspect_form','fill_form','drag_drop','upload_file','enter_iframe','exit_iframe','context_click','shortcut','execute_js','compose_email','book_slot','bridge_extension','login_saved'] },
+      action:      { type: 'string', enum: ['navigate','click','click_coords','type','key','scroll','hover','select','wait','done','new_tab','open_tabs','wait_tab','activate_tab','extract_data','extract_text','open_gmail_compose','schedule_calendar','synthesize','export_csv','copy_clipboard','inspect_form','fill_form','drag_drop','upload_file','enter_iframe','exit_iframe','context_click','shortcut','execute_js','compose_email','book_slot','bridge_extension','login_saved'] },
       element_id:  { type: ['integer', 'null'] },
       x:           { type: ['number', 'integer', 'null'] },
       y:           { type: ['number', 'integer', 'null'] },
@@ -3312,6 +3349,38 @@ function parseMaybeJson(value) {
   }
 }
 
+function buildGmailComposeUrl(raw) {
+  const parsed = parseMaybeJson(raw);
+  const payload = parsed && typeof parsed === 'object' ? parsed : {};
+  const textValue = typeof raw === 'string' && !parsed ? raw : '';
+  const to = String(payload.to || payload.recipient || '').trim();
+  const subject = String(payload.subject || '').trim();
+  const body = String(payload.body || payload.message || textValue || '').trim();
+  const qs = new URLSearchParams();
+  if (to) qs.set('to', to);
+  if (subject) qs.set('su', subject);
+  if (body) qs.set('body', body);
+  const suffix = qs.toString();
+  return 'https://mail.google.com/mail/u/0/?view=cm&fs=1&tf=1' + (suffix ? ('&' + suffix) : '');
+}
+
+function buildCalendarCreateUrl(raw) {
+  const parsed = parseMaybeJson(raw);
+  const payload = parsed && typeof parsed === 'object' ? parsed : {};
+  const textValue = typeof raw === 'string' && !parsed ? raw : '';
+  const title = String(payload.title || payload.event || payload.summary || 'Scheduled task').trim();
+  const details = String(payload.details || payload.description || textValue || '').trim();
+  const location = String(payload.location || '').trim();
+  const dates = String(payload.dates || payload.when || '').trim();
+  const qs = new URLSearchParams();
+  qs.set('action', 'TEMPLATE');
+  qs.set('text', title || 'Scheduled task');
+  if (details) qs.set('details', details);
+  if (location) qs.set('location', location);
+  if (dates) qs.set('dates', dates);
+  return 'https://calendar.google.com/calendar/u/0/r/eventedit?' + qs.toString();
+}
+
 function buildOrchestrationContext() {
   const ids = Object.keys(tabOrchestrationState.nodes);
   if (!ids.length) return '';
@@ -3483,8 +3552,8 @@ async function exportLatestCsv() {
 // HUMAN-IN-THE-LOOP SAFETY
 // =============================================================================
 const RISK_LEVELS = {
-  LOW: new Set(['navigate', 'scroll', 'click', 'hover', 'wait', 'open_tabs', 'wait_tab', 'activate_tab', 'shortcut', 'context_click', 'exit_iframe']),
-  MEDIUM: new Set(['type', 'select', 'key', 'extract_data', 'inspect_form', 'drag_drop', 'enter_iframe', 'compose_email', 'book_slot', 'bridge_extension', 'login_saved']),
+  LOW: new Set(['navigate', 'scroll', 'click', 'hover', 'wait', 'open_tabs', 'wait_tab', 'activate_tab', 'shortcut', 'context_click', 'exit_iframe', 'open_gmail_compose', 'schedule_calendar']),
+  MEDIUM: new Set(['type', 'select', 'key', 'extract_data', 'extract_text', 'inspect_form', 'drag_drop', 'enter_iframe', 'compose_email', 'book_slot', 'bridge_extension', 'login_saved']),
   HIGH: new Set(['fill_form', 'click_coords', 'copy_clipboard', 'export_csv', 'upload_file', 'execute_js']),
   CRITICAL: new Set(['submit', 'purchase', 'delete', 'send_email', 'post'])
 };
