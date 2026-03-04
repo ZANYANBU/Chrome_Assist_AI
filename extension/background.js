@@ -2525,14 +2525,31 @@ async function callEdgeBuiltinText(prompt, options = {}) {
   if (!tabId) {
     throw new Error('Edge built-in AI requires an active browser tab.');
   }
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const tabUrl = String(tab?.url || '');
+  if (!tabUrl || isChromePage(tabUrl)) {
+    throw new Error('Edge AI cannot run on browser internal pages. Open a normal website tab and retry.');
+  }
+
+  const sendEdgePrompt = async () => {
+    return chrome.tabs.sendMessage(tabId, {
+      action: 'EXECUTE',
+      command: {
+        action: 'edge_ai_prompt',
+        value: String(prompt || '')
+      }
+    }).catch(error => ({ success: false, error: error?.message || 'Edge AI call failed' }));
+  };
+
   await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
-  const response = await chrome.tabs.sendMessage(tabId, {
-    action: 'EXECUTE',
-    command: {
-      action: 'edge_ai_prompt',
-      value: String(prompt || '')
-    }
-  }).catch(error => ({ success: false, error: error?.message || 'Edge AI call failed' }));
+  let response = await sendEdgePrompt();
+
+  const message = String(response?.error || '').toLowerCase();
+  if (!response?.success && (message.includes('receiving end does not exist') || message.includes('could not establish connection'))) {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
+    await sleep(120);
+    response = await sendEdgePrompt();
+  }
 
   if (!response?.success) {
     throw new Error(response?.error || 'Edge built-in AI is not available in this tab/session.');
