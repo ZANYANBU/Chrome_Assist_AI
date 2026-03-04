@@ -1,6 +1,6 @@
-﻿<div align="center">
+<div align="center">
 
-# âœ¦ ZANYSURF â€” Autonomous AI Browser Agent
+# ¦ ZANYSURF Autonomous AI Browser Agent
 
 ### Give it a goal. It does the work.
 
