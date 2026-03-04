@@ -64,6 +64,155 @@ ZANYSURF is an AI browser agent that runs fully inside Chrome extension runtime 
 
 ---
 
+## 3.1) Detailed Workflow (End-to-End)
+
+This section documents exact runtime behavior from user input to completion, including cancellation semantics, orchestration, persistence, and observability.
+
+### A) Single-Agent Execution Workflow
+
+1. **Goal submission**
+  - UI entry point: `popup.js::doSend()`
+  - Message: `RUN_AGENT { prompt }`
+
+2. **Run lifecycle start**
+  - Background calls `startNewRun('run-agent')`
+  - Any previous active run is invalidated using token bump + abort flags
+  - New run receives a `runToken` and `currentAgentRunId`
+
+3. **Session bootstrap**
+  - `runAgentEntry(prompt, options)` validates prompt
+  - Goal continuation context is checked (`detectGoalContinuation`)
+  - Quick-run state/session metadata is persisted
+
+4. **Planning stage**
+  - `runAgentWithPlanning(goal, options)` creates plan (`generatePlan`)
+  - If schedule intent is detected, run may short-circuit into scheduler creation
+
+5. **Execution loop (`runAgentLoop`)**
+  - Active tab resolution + load wait + content script readiness
+  - Context gather from DOM/vision + history/memory
+  - LLM action decision (`getNextAction`) or fast-path decision
+  - Safety guards + risk gate (`executeWithRiskCheck`)
+  - Action dispatch to content script (`EXECUTE`)
+  - Step result persisted to action history / memory / audit stream
+  - Repeat until success, done, abort, max-steps, or stale token
+
+6. **Completion/termination**
+  - Success emits `AGENT_COMPLETE`
+  - Errors emit `AGENT_ERROR`
+  - Abort/cancel returns `Run cancelled` semantics
+  - Task history/workflow personalization updated
+
+### B) Multi-Agent Orchestration Workflow
+
+1. **Trigger path**
+  - Message: `RUN_MULTI_AGENT` or goal pattern requiring orchestration
+
+2. **Goal decomposition**
+  - `OrchestratorAgent.decomposeGoal(goal)` creates step graph
+  - Typical chain:
+    - `a1` research
+    - `a2` analysis (depends on `a1`)
+    - `a3` writer (depends on `a2`)
+
+3. **Execution model**
+  - Dependency-free tasks can run in parallel (`Promise.all`)
+  - Dependent tasks run sequentially
+  - Tree state updates (`pending/running/completed/failed`) emitted via `AGENT_TREE`
+
+4. **Inter-agent communication**
+  - Bus envelopes emitted through `AgentBus` / `InterAgentBus`
+  - UI receives `AGENT_BUS_EVENT` for observability
+
+5. **Final synthesis**
+  - Outputs merged and summarized (`synthesizePlanResults`)
+  - Final completion emitted with overall summary
+
+### C) Cancellation, Restart, and Stale-Run Protection
+
+ZANYSURF uses a **token ownership model** for robust cancellation:
+
+- `activeRunToken` is incremented whenever a run is cancelled/replaced.
+- All critical loops/steps validate ownership with `isRunTokenCurrent(runToken)`.
+- Any stale run exits early instead of executing additional actions.
+
+#### UI behavior when user submits a new goal during active run
+- Popup sends `CANCEL_AND_CLEAR`
+- Toast: `Old run cancelled`
+- Popup immediately starts new run via `RUN_AGENT`
+- Toast: `New run started`
+
+#### Stop/Clear actions
+- `STOP_AGENT`: abort active run (no full memory wipe)
+- `CANCEL_AND_CLEAR`: abort + clear run-context state
+- `CLEAR_MEMORY`: cancellation first, then memory structures reset
+
+### D) Scheduler Workflow
+
+1. User creates schedule from prompt/UI
+2. Background parses schedule intent (`parseScheduleFromGoal`)
+3. `SchedulerEngine.createTask` stores normalized task + next run
+4. Chrome alarms trigger execution at runtime
+5. Task run updates `lastRun` / `nextRun`
+
+### E) Memory and Knowledge Workflow
+
+1. During each step, relevant action context is embedded/recorded
+2. `retrieveMemoryContext(goal)` computes top-K relevant memory snippets
+3. Knowledge entities from extraction are upserted to graph
+4. Future plans/prompts include recalled memory + graph-derived signals
+
+### F) Vault and Provider-Key Workflow
+
+1. User enters provider key in settings
+2. UI requests passphrase to unlock session vault
+3. Background encrypts and stores provider key (AES-GCM)
+4. At runtime, settings resolve provider key for selected provider only
+5. Keys are not persisted as plaintext in extension storage
+
+### G) Observability Workflow
+
+The UI consumes runtime events for live insight:
+
+- `AGENT_STATUS` (state transitions)
+- `AGENT_THINKING` (reasoning phase)
+- `AGENT_LOG` (decision + chosen action)
+- `AGENT_EXEC_RESULT` (execution outcome)
+- `AGENT_PLAN` / `AGENT_PLAN_PROGRESS` (planner trace)
+- `AGENT_TREE` (orchestrator structure)
+- `AGENT_BUS_EVENT` (inter-agent event stream)
+- `AGENT_COMPLETE` / `AGENT_ERROR` (terminal state)
+
+### H) Data Persistence Map (Primary Keys)
+
+- `zanysurf_audit_log` — immutable-like execution trace
+- `zanysurf_knowledge_graph` — extracted entity graph
+- `zanysurf_quick_runs` — recent run goals
+- `zanysurf_scheduled_tasks` — scheduler task state
+- `zanysurf_safe_mode` — safe mode toggle
+- `zanysurf_api_metrics` — provider call metrics
+- `zanysurf_last_session_state` — resumable session info
+- `zanysurf_credential_vault` — encrypted secret vault
+
+### I) QA + Release Workflow
+
+1. Run unit tests:
+  - `npm test -- --runInBand`
+2. Run static/performance checks from `qa/`
+3. Validate root ↔ `extension/` parity for runtime files
+4. Capture store screenshots and checklist artifacts
+5. Package `extension/` for upload
+
+### J) Failure Modes and Recovery
+
+- **No active tab / inaccessible URL**: run exits with classification + user message
+- **Network/provider errors**: classified into user-facing categories
+- **Permission blocked action**: safety gate blocks execution and reports reason
+- **Stuck action loop**: loop fingerprint detection triggers escape strategy
+- **Stale concurrent run**: token mismatch forces old loop termination
+
+---
+
 ## 4) Functional Specification
 
 ### 4.1 Agent Execution
