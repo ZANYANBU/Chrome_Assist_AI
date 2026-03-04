@@ -8,7 +8,7 @@ Run natural-language goals as auditable browser workflows with local or cloud LL
 
 [![Manifest](https://img.shields.io/badge/Manifest-V3-2ea44f)](https://developer.chrome.com/docs/extensions/mv3/intro/)
 [![Platform](https://img.shields.io/badge/Platform-Chrome_Extension-4285F4)](https://developer.chrome.com/docs/extensions/)
-[![Version](https://img.shields.io/badge/Version-1.0.1-6f42c1)](manifest.json)
+[![Version](https://img.shields.io/badge/Version-2.0.0-6f42c1)](manifest.json)
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
 </div>
@@ -45,7 +45,7 @@ ZANYSURF is a production-grade autonomous browser agent implemented entirely in 
 - Deterministic run lifecycle with stale-run invalidation and cancel/restart safety
 
 ### Current status
-- Release version: `1.0.1`
+- Release version: `2.0.0`
 - Test baseline: `15/15` unit tests passing
 - Store readiness: ready with final privacy-policy URL pending publication
 

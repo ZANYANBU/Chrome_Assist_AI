@@ -3,7 +3,7 @@
   "name": "ZANYSURF Browser Agent",
   "short_name": "ZANYSURF",
   "author": "Anbuchelvan Valavan",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "AI browser agent with local Ollama or Gemini for guided autonomous web navigation and task automation.",
   "icons": {
     "16":  "icons/icon16.png",
