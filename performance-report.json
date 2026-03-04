@@ -1,0 +1,8 @@
+{
+  "domMappingMs": 8.89059999999995,
+  "memoryRetrievalMs": 4.608799999999974,
+  "knowledgeGraphRenderMs": null,
+  "stepLatencyExcludingLlmMs": null,
+  "extensionLoadMs": 1.1967999999999392,
+  "storageBytesEstimate": 275896
+}

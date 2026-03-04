@@ -3,99 +3,274 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ZANYSURF AI Agent</title>
+  <title>ZANYSURF</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-
-  <!-- HEADER -->
-  <div class="header">
-    <div class="logo">
-      <span class="star">✦</span>
-      <span class="name">ZANYSURF</span>
-      <span class="tag">AI Agent</span>
-    </div>
-    <div class="hbtns">
-      <div id="conn-dot" class="conn-dot" title="Ollama connection status"></div>
-      <button id="clear-btn" class="hbtn" title="New task">↺</button>
-      <button id="settings-btn" class="hbtn" title="Settings">⚙</button>
-    </div>
-  </div>
-
-  <!-- SETTINGS PANEL -->
-  <div id="settings-panel" class="settings-panel hidden">
-    <div class="s-title">⚙ Settings</div>
-    <div class="field">
-      <label>Provider</label>
-      <select id="provider-select">
-        <option value="ollama">Ollama (Local — Free)</option>
-        <option value="gemini">Gemini API (Cloud)</option>
-      </select>
-    </div>
-
-    <div id="ollama-fields">
-      <div class="field">
-        <label>Ollama URL</label>
-        <input id="ollama-url" type="url" placeholder="http://localhost:11434" value="http://localhost:11434">
-      </div>
-      <div class="field">
-        <label>Model</label>
-        <input id="ollama-model" type="text" placeholder="llama3.2:latest" value="llama3.2:latest">
-      </div>
-      <div class="field-hint">Install models: <code>ollama pull llama3.2:latest</code> (3B, recommended)</div>
-      <div class="field-hint">Remote Ollama (TrueNAS, home server):<br><code>http://[server-ip]:11434</code></div>
-    </div>
-
-    <div id="gemini-fields" class="hidden">
-      <div class="field">
-        <label>Gemini API Key</label>
-        <input id="gemini-key" type="password" placeholder="AIza…">
-      </div>
-      <div class="field-hint">Get key at <a href="https://aistudio.google.com" target="_blank">aistudio.google.com</a></div>
-    </div>
-
-    <div class="s-btns">
-      <button id="save-btn" class="btn-pri">💾 Save</button>
-      <button id="test-btn" class="btn-sec">🔌 Test Connection</button>
-    </div>
-    <div id="test-out" class="test-out hidden"></div>
-  </div>
-
-  <!-- LIVE STATUS BAR -->
-  <div id="live-bar" class="live-bar hidden">
-    <div class="live-bar-inner">
-      <div class="live-left">
-        <div class="spinner"></div>
-        <div class="live-info">
-          <div id="live-step">Starting…</div>
-          <div id="live-url" class="live-url"></div>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo-mark" aria-hidden="true"></span>
+        <div class="brand-copy">
+          <strong>ZANYSURF</strong>
+          <span>By Anbu Chelvan</span>
         </div>
       </div>
-      <button id="stop-btn" class="stop-btn">■ Stop</button>
+      <div class="topbar-actions">
+        <span class="status-pill"><span id="conn-dot" class="conn-dot"></span><span id="conn-label">Connected</span></span>
+        <button id="settings-btn" class="btn-icon" title="Settings">⚙</button>
+        <button id="open-panel-btn" class="btn-icon" title="Open full panel">⊞</button>
+        <button id="clear-btn" class="btn-icon" title="New task">↺</button>
+      </div>
+    </header>
+
+    <section class="quick-launch">
+      <div class="goal-box-wrap">
+        <textarea id="input" class="input goal-input" placeholder="What do you want to do?" rows="3" autocomplete="off" spellcheck="false"></textarea>
+        <button id="send-btn" class="btn-primary goal-submit">Enter ↵</button>
+      </div>
+      <div class="quick-toggles">
+        <button id="safe-mode-btn" class="btn-ghost">🔒 Safe mode off</button>
+        <button id="plan-mode-btn" class="btn-ghost is-on">📋 Plan mode on</button>
+      </div>
+    </section>
+
+    <section class="quick-actions card">
+      <div class="quick-grid" id="quick-grid">
+        <button class="quick-action" data-prompt="Search Google for latest AI browser agent news"><span>🔍</span><em>Search</em></button>
+        <button class="quick-action" data-prompt="Extract all pricing details from this page"><span>📄</span><em>Extract</em></button>
+        <button class="quick-action" data-prompt="Inspect this form and fill it with suitable values"><span>📝</span><em>Fill</em></button>
+        <button class="quick-action" data-prompt="Compare top 3 options with pros and cons"><span>📊</span><em>Compare</em></button>
+        <button class="quick-action" data-prompt="Compose an email draft from page context"><span>📧</span><em>Email</em></button>
+        <button id="add-schedule-btn" class="quick-action"><span>📅</span><em>Schedule</em></button>
+        <button id="add-bookmark-btn" class="quick-action"><span>🔖</span><em>Bookmark</em></button>
+        <button id="refresh-workflows-btn" class="quick-action"><span>⚡</span><em>Replay</em></button>
+      </div>
+    </section>
+
+    <section class="recent card">
+      <div class="section-head">
+        <h3>Recent Tasks</h3>
+      </div>
+      <div id="recent-tasks-list" class="recent-list"></div>
+    </section>
+
+    <section id="live-bar" class="live-status hidden">
+      <div class="live-progress-track"><div id="live-progress" class="live-progress"></div></div>
+      <div class="live-main">
+        <div class="live-copy">
+          <div id="live-step">Step 0/30</div>
+          <div id="live-url" class="live-url"></div>
+        </div>
+        <div class="live-actions">
+          <button id="stop-btn" class="btn-danger">■ Stop</button>
+          <button id="open-panel-inline" class="btn-secondary">↗ Open full view</button>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer-bar">
+      <span>By Anbu Chelvan</span>
+      <span>v2.0.0</span>
+      <span id="footer-count">◈ 0 tasks done</span>
+    </footer>
+
+    <aside id="settings-panel" class="settings-panel hidden card-elevated">
+      <div class="section-head"><h3>Settings</h3></div>
+      <div class="field">
+        <label>Provider</label>
+        <div id="provider-group" class="provider-group">
+          <button class="provider-chip" data-provider="ollama">Ollama</button>
+          <button class="provider-chip" data-provider="gemini">Gemini</button>
+          <button class="provider-chip" data-provider="openai">OpenAI</button>
+          <button class="provider-chip" data-provider="claude">Claude</button>
+          <button class="provider-chip" data-provider="groq">Groq</button>
+          <button class="provider-chip" data-provider="mistral">Mistral</button>
+        </div>
+        <select id="provider-select" class="select hidden" aria-hidden="true">
+          <option value="ollama">Ollama (Local)</option>
+          <option value="gemini">Gemini API</option>
+          <option value="openai">OpenAI</option>
+          <option value="claude">Claude</option>
+          <option value="groq">Groq</option>
+          <option value="mistral">Mistral</option>
+        </select>
+      </div>
+      <div id="ollama-fields">
+        <div class="field">
+          <label for="ollama-url">URL</label>
+          <input id="ollama-url" class="input" type="url" placeholder="http://localhost:11434" value="http://localhost:11434">
+        </div>
+        <div class="field">
+          <label for="provider-model-select">Model</label>
+          <select id="provider-model-select" class="select"></select>
+          <input id="ollama-model" class="input hidden" type="text" placeholder="llama3">
+        </div>
+        <div class="inline-actions">
+          <button id="detect-models-btn" class="btn-secondary">🔍 Auto-detect models</button>
+        </div>
+        <div id="provider-stats" class="test-out">Avg latency: — · Success: — · Calls: —</div>
+        <div id="provider-recommendation" class="test-out">💡 Recommendation for current task: —</div>
+        <div id="ollama-install-guide" class="test-out hidden">
+          ⚠ Cannot connect to localhost:11434<br>
+          1. Download Ollama: ollama.com<br>
+          2. Run: <code>ollama serve</code><br>
+          3. Pull model: <code>ollama pull llama3.2</code>
+        </div>
+      </div>
+      <div id="gemini-fields" class="hidden">
+        <div class="field">
+          <label for="provider-key">API Key</label>
+          <div class="key-row">
+            <input id="provider-key" class="input" type="password" placeholder="••••••••••••••••">
+            <button id="provider-key-toggle" class="btn-icon" title="Show/Hide key">👁</button>
+          </div>
+          <div id="provider-key-help" class="muted"></div>
+          <input id="gemini-key" class="input hidden" type="password" placeholder="AIza…">
+        </div>
+      </div>
+      <div class="inline-actions">
+        <button id="save-btn" class="btn-primary">Save</button>
+        <button id="test-btn" class="btn-secondary">Test Connection</button>
+      </div>
+      <div id="test-out" class="test-out hidden"></div>
+    </aside>
+
+    <section class="workspace">
+      <nav class="nav-rail">
+        <button class="nav-item is-active" data-view="view-home" title="Dashboard">⌂</button>
+        <button class="nav-item" data-view="view-agent" title="Agent">◈</button>
+        <button class="nav-item" data-view="view-memory" title="Memory">🧠</button>
+        <button class="nav-item" data-view="view-schedule" title="Schedule">📅</button>
+        <button class="nav-item" data-view="view-workflows" title="Workflows">📼</button>
+        <button class="nav-item" data-view="view-bookmarks" title="Bookmarks">🔖</button>
+        <button class="nav-item" data-view="view-vault" title="Vault">🔐</button>
+        <button class="nav-item" data-view="view-analytics" title="Analytics">📊</button>
+        <button class="nav-item" data-view="view-settings" title="Settings">⚙</button>
+      </nav>
+
+      <div class="workspace-content">
+        <header class="workspace-head">
+          <div class="brand-mini"><span class="logo-mark"></span><strong>ZANYSURF</strong></div>
+          <span id="agent-health-pill" class="badge badge-green">Idle</span>
+        </header>
+
+        <main class="workspace-main">
+          <section id="view-home" class="view is-active">
+            <div class="card"><div class="tile-title">Today</div><div id="today-schedules" class="list"></div></div>
+            <div class="card"><div class="tile-title">Agent Health</div><div id="memory-stats" class="list"></div></div>
+            <div class="card"><div class="tile-title">Quick Run</div><div id="quick-run-list" class="list"></div></div>
+            <div class="card"><div class="tile-title">Activity</div><div id="activity-feed" class="list"></div></div>
+          </section>
+
+          <section id="view-agent" class="view">
+            <div class="example-pills">
+              <button class="example-pill" data-q="Go to GitHub and search for React projects">GitHub search</button>
+              <button class="example-pill" data-q="Extract pricing from this page">Extract pricing</button>
+              <button class="example-pill" data-q="Research mechanical keyboards and summarize options">Research keyboards</button>
+            </div>
+            <div id="chat" class="chat"></div>
+          </section>
+
+          <section id="view-memory" class="view">
+            <div class="tabs">
+              <button class="tab is-active" data-memory-tab="memories">Memories</button>
+              <button class="tab" data-memory-tab="graph">Knowledge Graph</button>
+            </div>
+            <div id="memory-memories" class="tab-panel is-active card"><div id="memory-summary" class="list"></div></div>
+            <div id="memory-graph" class="tab-panel card"><div id="knowledge-graph" class="list graph"></div></div>
+          </section>
+
+          <section id="view-schedule" class="view">
+            <div class="section-head with-actions">
+              <h3>Schedules</h3>
+              <button id="refresh-schedule-btn" class="btn-secondary">Refresh</button>
+            </div>
+            <div id="scheduled-list" class="list card"></div>
+          </section>
+
+          <section id="view-workflows" class="view">
+            <div class="section-head with-actions">
+              <h3>Workflows</h3>
+              <button class="btn-secondary" id="workflow-refresh-alt">Refresh</button>
+            </div>
+            <div id="workflows-list" class="list card"></div>
+          </section>
+
+          <section id="view-bookmarks" class="view">
+            <div class="section-head with-actions">
+              <h3>Bookmarks</h3>
+              <button id="refresh-bookmarks-btn" class="btn-secondary">Refresh</button>
+            </div>
+            <div id="bookmarks-list" class="list card"></div>
+          </section>
+
+          <section id="view-vault" class="view">
+            <div class="section-head with-actions">
+              <h3>Vault</h3>
+              <div class="inline-actions">
+                <button id="save-credential-btn" class="btn-secondary">+ Save Login</button>
+                <button id="login-credential-btn" class="btn-secondary">Auto-login</button>
+                <button id="list-credentials-btn" class="btn-secondary">List</button>
+              </div>
+            </div>
+            <div class="empty-state">🔐 Vault actions are available from the buttons above.</div>
+          </section>
+
+          <section id="view-analytics" class="view">
+            <div class="tabs">
+              <button class="tab is-active" data-analytics-tab="audit">Audit Log</button>
+              <button class="tab" data-analytics-tab="metrics">API Metrics</button>
+            </div>
+            <div id="analytics-audit" class="tab-panel is-active card">
+              <div class="inline-actions">
+                <button id="export-audit-btn" class="btn-secondary">Export JSON</button>
+                <button id="replay-report-btn" class="btn-secondary">Export Replay</button>
+              </div>
+              <div id="agent-tree" class="list"></div>
+            </div>
+            <div id="analytics-metrics" class="tab-panel card">
+              <input id="replay-slider" class="input" type="range" min="1" max="1" value="1">
+              <div id="replay-step" class="list"></div>
+            </div>
+          </section>
+
+          <section id="view-settings" class="view">
+            <div class="card">
+              <div class="tile-title">LLM Provider</div>
+              <p class="muted">Use the top-right settings icon for provider, model, and connection test.</p>
+            </div>
+            <div class="card">
+              <div class="tile-title">Agent Behavior</div>
+              <p class="muted">Safe mode and plan mode are available in quick launch controls.</p>
+            </div>
+            <div class="card">
+              <div class="tile-title">About</div>
+              <p class="muted">ZANYSURF v2.0.0 · Built by Anbu Chelvan Valavan</p>
+            </div>
+          </section>
+        </main>
+
+        <footer class="workspace-foot">Anbu Chelvan · <span id="storage-foot">0 MB storage</span></footer>
+      </div>
+    </section>
+
+    <div id="onboarding" class="onboarding hidden">
+      <div class="onboarding-card card-elevated">
+        <div class="onboarding-progress"></div>
+        <h3>Welcome to ZANYSURF</h3>
+        <p>Set provider, test connection, run an example, and save your first bookmark.</p>
+        <div class="inline-actions">
+          <button id="onboard-test" class="btn-primary">1) Test LLM</button>
+          <button id="onboard-example" class="btn-secondary">2) Run Example</button>
+          <button id="onboard-bookmark" class="btn-secondary">3) Save Bookmark</button>
+          <button id="onboard-finish" class="btn-ghost">Finish</button>
+        </div>
+      </div>
     </div>
-    <div id="live-progress" class="live-progress"></div>
-  </div>
-
-  <!-- CHAT AREA -->
-  <div id="chat" class="chat"></div>
-
-  <!-- INPUT BAR -->
-  <div class="input-row">
-    <textarea
-      id="input"
-      placeholder="What should I do? e.g. Go to GitHub and search for react projects"
-      rows="2"
-      autocomplete="off"
-      spellcheck="false"
-    ></textarea>
-    <button id="send-btn" class="send-btn" title="Run agent (Enter)">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-        <path d="M2 21L23 12 2 3v7l15 2-15 2z"/>
-      </svg>
-    </button>
   </div>
 
   <script src="popup.js"></script>
 </body>
 </html>
-

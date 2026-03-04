@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ZANYSURF E2E Test Runner</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; color: #0f172a; }
+    h1 { margin: 0 0 8px; }
+    .muted { color: #475569; font-size: 14px; margin-bottom: 12px; }
+    .row { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+    input, button, textarea, select { padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 14px; }
+    input, textarea { min-width: 260px; }
+    button { cursor: pointer; background: #0f172a; color: #fff; border: none; }
+    button.secondary { background: #e2e8f0; color: #0f172a; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(320px,1fr)); gap: 12px; }
+    .card { border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px; background: #fff; }
+    .ok { color: #166534; font-weight: 700; }
+    .fail { color: #991b1b; font-weight: 700; }
+    pre { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; overflow: auto; max-height: 180px; }
+    .manual { margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <h1>ZANYSURF E2E Runner</h1>
+  <div class="muted">Runs automated smoke tests and records manual verification evidence for store readiness.</div>
+
+  <div class="row">
+    <input id="extensionId" placeholder="Extension ID (optional if opened from extension page)" />
+    <button id="runAuto">Run Auto Tests</button>
+    <button id="exportJson" class="secondary">Export JSON</button>
+  </div>
+
+  <div id="summary" class="muted">No tests executed yet.</div>
+  <div id="autoGrid" class="grid"></div>
+
+  <div class="manual">
+    <h2>Manual Evidence Cards</h2>
+    <div id="manualGrid" class="grid"></div>
+  </div>
+
+  <script>
+    const autoTests = [
+      {
+        id: 'auto_plan_events',
+        name: 'Agent Plan Events',
+        run: async (send) => {
+          await send({ action: 'RUN_AGENT', prompt: 'Open example.com and summarize heading', options: { multiAgent: true, maxSteps: 2 } });
+          await wait(2000);
+          const events = await send({ action: 'GET_RECENT_EVENTS' });
+          const hasPlan = Array.isArray(events.events) && events.events.some(e => e.action === 'AGENT_PLAN' || e.action === 'AGENT_PLAN_PROGRESS');
+          return { pass: hasPlan, details: events };
+        }
+      },
+      {
+        id: 'auto_workflows',
+        name: 'Workflow List Returns Array',
+        run: async (send) => {
+          const res = await send({ action: 'GET_WORKFLOWS' });
+          return { pass: Array.isArray(res.workflows), details: res };
+        }
+      },
+      {
+        id: 'auto_bookmarks',
+        name: 'Bookmark List Returns Array',
+        run: async (send) => {
+          const res = await send({ action: 'GET_BOOKMARKS' });
+          return { pass: Array.isArray(res.bookmarks), details: res };
+        }
+      },
+      {
+        id: 'auto_memory_context',
+        name: 'Memory Context Returns Array',
+        run: async (send) => {
+          const res = await send({ action: 'GET_MEMORY_CONTEXT', goal: 'qa validation' });
+          return { pass: Array.isArray(res.memory), details: res };
+        }
+      },
+      {
+        id: 'auto_session',
+        name: 'Session State Endpoint',
+        run: async (send) => {
+          const res = await send({ action: 'GET_SESSION_STATE' });
+          return { pass: res.success === true, details: res };
+        }
+      },
+      {
+        id: 'auto_api_metrics',
+        name: 'API Metrics Includes callCount',
+        run: async (send) => {
+          const res = await send({ action: 'GET_API_METRICS' });
+          const pass = typeof res.metrics?.callCount === 'number';
+          return { pass, details: res };
+        }
+      },
+      {
+        id: 'auto_safe_mode',
+        name: 'Safe Mode Endpoint',
+        run: async (send) => {
+          const res = await send({ action: 'GET_SAFE_MODE' });
+          return { pass: typeof res.enabled === 'boolean', details: res };
+        }
+      },
+      {
+        id: 'auto_error_classification',
+        name: 'Error Classification Endpoint',
+        run: async (send) => {
+          const res = await send({ action: 'TEST_ERROR_CLASSIFICATION', message: 'network timeout while fetching' });
+          return { pass: !!res.classification?.type, details: res };
+        }
+      },
+      {
+        id: 'auto_schedule_alias',
+        name: 'Create Schedule Alias',
+        run: async (send) => {
+          const res = await send({ action: 'CREATE_SCHEDULE', goal: 'E2E check', schedule: 'daily' });
+          return { pass: !!res.task?.id, details: res };
+        }
+      }
+    ];
+
+    const manualCards = [
+      'Open popup, run multi-agent goal, confirm AGENT_PLAN and AGENT_COMPLETE messages in UI',
+      'Run credential login on test site and verify fields auto-filled correctly',
+      'Verify dynamic code execution is blocked: execute_js only accepts preset names',
+      'Capture permissions justification screenshots for store listing',
+      'Run performance script and confirm DOM mapping is < 200ms'
+    ];
+
+    const manualState = {};
+    const runResults = [];
+
+    function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    function sendToExtension(extensionId, message) {
+      return new Promise((resolve, reject) => {
+        const callback = (resp) => {
+          if (chrome.runtime?.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          resolve(resp || {});
+        };
+
+        if (extensionId && chrome.runtime?.sendMessage) {
+          chrome.runtime.sendMessage(extensionId, message, callback);
+        } else if (chrome.runtime?.sendMessage) {
+          chrome.runtime.sendMessage(message, callback);
+        } else {
+          reject(new Error('chrome.runtime.sendMessage is not available in this context.'));
+        }
+      });
+    }
+
+    function renderManualCards() {
+      const grid = document.getElementById('manualGrid');
+      grid.innerHTML = '';
+      manualCards.forEach((title, index) => {
+        const id = 'manual_' + index;
+        const data = manualState[id] || { status: 'pending', note: '', fileName: '' };
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <div><strong>${title}</strong></div>
+          <div class="row" style="margin-top:8px">
+            <select data-id="${id}" class="manual-status">
+              <option value="pending" ${data.status === 'pending' ? 'selected' : ''}>Pending</option>
+              <option value="pass" ${data.status === 'pass' ? 'selected' : ''}>Pass</option>
+              <option value="fail" ${data.status === 'fail' ? 'selected' : ''}>Fail</option>
+            </select>
+            <input type="file" data-id="${id}" class="manual-file" />
+          </div>
+          <textarea data-id="${id}" class="manual-note" rows="3" placeholder="Evidence note">${data.note || ''}</textarea>
+          <div class="muted">Evidence: ${data.fileName || 'none'}</div>
+        `;
+        grid.appendChild(card);
+      });
+
+      document.querySelectorAll('.manual-status').forEach(el => {
+        el.addEventListener('change', (e) => {
+          const id = e.target.dataset.id;
+          manualState[id] = { ...(manualState[id] || {}), status: e.target.value };
+        });
+      });
+
+      document.querySelectorAll('.manual-note').forEach(el => {
+        el.addEventListener('input', (e) => {
+          const id = e.target.dataset.id;
+          manualState[id] = { ...(manualState[id] || {}), note: e.target.value };
+        });
+      });
+
+      document.querySelectorAll('.manual-file').forEach(el => {
+        el.addEventListener('change', (e) => {
+          const id = e.target.dataset.id;
+          const file = e.target.files?.[0];
+          manualState[id] = { ...(manualState[id] || {}), fileName: file?.name || '' };
+          renderManualCards();
+        });
+      });
+    }
+
+    function renderAuto(results) {
+      const grid = document.getElementById('autoGrid');
+      grid.innerHTML = '';
+      let passCount = 0;
+      for (const item of results) {
+        if (item.pass) passCount++;
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <div><strong>${item.name}</strong></div>
+          <div class="${item.pass ? 'ok' : 'fail'}">${item.pass ? 'PASS' : 'FAIL'}</div>
+          <pre>${JSON.stringify(item.details, null, 2)}</pre>
+        `;
+        grid.appendChild(card);
+      }
+      document.getElementById('summary').textContent = `Auto tests: ${passCount}/${results.length} passed`;
+    }
+
+    document.getElementById('runAuto').addEventListener('click', async () => {
+      const extensionId = document.getElementById('extensionId').value.trim();
+      runResults.length = 0;
+      for (const test of autoTests) {
+        try {
+          const result = await test.run((message) => sendToExtension(extensionId, message));
+          runResults.push({ id: test.id, name: test.name, pass: !!result.pass, details: result.details });
+        } catch (error) {
+          runResults.push({ id: test.id, name: test.name, pass: false, details: { error: error.message } });
+        }
+      }
+      renderAuto(runResults);
+    });
+
+    document.getElementById('exportJson').addEventListener('click', () => {
+      const report = {
+        generatedAt: new Date().toISOString(),
+        auto: runResults,
+        manual: manualCards.map((title, index) => ({
+          title,
+          ...(manualState['manual_' + index] || { status: 'pending', note: '', fileName: '' })
+        }))
+      };
+
+      const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'zanysurf-e2e-report.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    renderManualCards();
+  </script>
+</body>
+</html>

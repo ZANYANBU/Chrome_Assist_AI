@@ -1,0 +1,328 @@
+{
+  "syntax": {
+    "js": [
+      {
+        "file": "background.js",
+        "ok": true
+      },
+      {
+        "file": "content.js",
+        "ok": true
+      },
+      {
+        "file": "popup.js",
+        "ok": true
+      },
+      {
+        "file": "extension/background.js",
+        "ok": true
+      },
+      {
+        "file": "extension/content.js",
+        "ok": true
+      },
+      {
+        "file": "extension/popup.js",
+        "ok": true
+      }
+    ],
+    "json": [
+      {
+        "file": "manifest.json",
+        "ok": true
+      },
+      {
+        "file": "metadata.json",
+        "ok": true
+      },
+      {
+        "file": "extension/manifest.json",
+        "ok": true
+      }
+    ],
+    "html": [
+      {
+        "file": "popup.html",
+        "ok": true,
+        "error": ""
+      },
+      {
+        "file": "extension/popup.html",
+        "ok": true,
+        "error": ""
+      }
+    ]
+  },
+  "manifest": {
+    "manifestVersion3": true,
+    "sidePanelConfig": true,
+    "commandAltZ": true,
+    "bgServiceWorker": true,
+    "contentScriptAllUrls": true,
+    "hostAllUrls": true,
+    "permissions": [
+      {
+        "perm": "sidePanel",
+        "ok": true
+      },
+      {
+        "perm": "declarativeNetRequest",
+        "ok": true
+      },
+      {
+        "perm": "notifications",
+        "ok": true
+      },
+      {
+        "perm": "downloads",
+        "ok": true
+      },
+      {
+        "perm": "clipboardWrite",
+        "ok": true
+      },
+      {
+        "perm": "alarms",
+        "ok": true
+      },
+      {
+        "perm": "storage",
+        "ok": true
+      },
+      {
+        "perm": "scripting",
+        "ok": true
+      },
+      {
+        "perm": "activeTab",
+        "ok": true
+      },
+      {
+        "perm": "tabs",
+        "ok": true
+      },
+      {
+        "perm": "contextMenus",
+        "ok": true
+      }
+    ]
+  },
+  "sync": [
+    {
+      "pair": "background.js ↔ extension/background.js",
+      "ok": true,
+      "hashA": "a5b2abe49ff34870d36adae56eb2f3d2161d2545fa676fbe260574b3432a5af7",
+      "hashB": "a5b2abe49ff34870d36adae56eb2f3d2161d2545fa676fbe260574b3432a5af7"
+    },
+    {
+      "pair": "content.js ↔ extension/content.js",
+      "ok": true,
+      "hashA": "2b960b0ea826b85cbf55355dca679b9b78c0c2afacf57a0a408ea8c4471cc750",
+      "hashB": "2b960b0ea826b85cbf55355dca679b9b78c0c2afacf57a0a408ea8c4471cc750"
+    },
+    {
+      "pair": "popup.js ↔ extension/popup.js",
+      "ok": true,
+      "hashA": "31ed0dcc9fc3155a89129caa1b4e98e64ecb072285c2b919e2b8215d6d9d08de",
+      "hashB": "31ed0dcc9fc3155a89129caa1b4e98e64ecb072285c2b919e2b8215d6d9d08de"
+    },
+    {
+      "pair": "popup.html ↔ extension/popup.html",
+      "ok": true,
+      "hashA": "f3b775bfac056cfadc2286b2b64ad03b0526accf6a84934acf9b9f54050be9b3",
+      "hashB": "f3b775bfac056cfadc2286b2b64ad03b0526accf6a84934acf9b9f54050be9b3"
+    },
+    {
+      "pair": "popup.css ↔ extension/popup.css",
+      "ok": true,
+      "hashA": "8c6fbfd354d8e0d3078db355bce9b47f0cfcc213d2d9994504262a829510682c",
+      "hashB": "8c6fbfd354d8e0d3078db355bce9b47f0cfcc213d2d9994504262a829510682c"
+    },
+    {
+      "pair": "manifest.json ↔ extension/manifest.json",
+      "ok": true,
+      "hashA": "754fa1088995fcf470d23d90d4d999ef444e1e2d098eb7701ae74c435dad6faf",
+      "hashB": "754fa1088995fcf470d23d90d4d999ef444e1e2d098eb7701ae74c435dad6faf"
+    }
+  ],
+  "functions": {
+    "background": [
+      {
+        "name": "runAgentEntry",
+        "ok": true
+      },
+      {
+        "name": "OrchestratorAgent",
+        "ok": true
+      },
+      {
+        "name": "ResearchAgent",
+        "ok": true
+      },
+      {
+        "name": "AnalysisAgent",
+        "ok": true
+      },
+      {
+        "name": "WriterAgent",
+        "ok": true
+      },
+      {
+        "name": "ActionAgent",
+        "ok": true
+      },
+      {
+        "name": "InterAgentBus",
+        "ok": true
+      },
+      {
+        "name": "triggerLazyLoadScroll",
+        "ok": true
+      },
+      {
+        "name": "generatePlan",
+        "ok": true
+      },
+      {
+        "name": "runAgentWithPlanning",
+        "ok": true
+      },
+      {
+        "name": "retrieveMemoryContext",
+        "ok": true
+      },
+      {
+        "name": "detectGoalContinuation",
+        "ok": true
+      },
+      {
+        "name": "persistSessionState",
+        "ok": true
+      },
+      {
+        "name": "upsertKnowledgeGraph",
+        "ok": true
+      },
+      {
+        "name": "getKnowledgeGraph",
+        "ok": true
+      },
+      {
+        "name": "appendAuditLog",
+        "ok": true
+      },
+      {
+        "name": "exportAuditLog",
+        "ok": true
+      },
+      {
+        "name": "updateApiMetrics",
+        "ok": true
+      },
+      {
+        "name": "classifyAgentError",
+        "ok": true
+      },
+      {
+        "name": "toggleSafeMode",
+        "ok": true
+      },
+      {
+        "name": "buildAgentDashboardSummary",
+        "ok": true
+      },
+      {
+        "name": "generateStepReplayHtml",
+        "ok": true
+      },
+      {
+        "name": "SchedulerEngine",
+        "ok": true
+      },
+      {
+        "name": "PersonalizationEngine",
+        "ok": true
+      },
+      {
+        "name": "SmartBookmarks",
+        "ok": true
+      }
+    ],
+    "content": [
+      {
+        "name": "buildDomMap",
+        "ok": true
+      },
+      {
+        "name": "executeAction",
+        "ok": true
+      },
+      {
+        "name": "detectPageType",
+        "ok": true
+      },
+      {
+        "name": "extractSemanticSections",
+        "ok": true
+      },
+      {
+        "name": "findPrimaryCTA",
+        "ok": true
+      },
+      {
+        "name": "extractCleanArticleText",
+        "ok": true
+      },
+      {
+        "name": "extractMediaContext",
+        "ok": true
+      },
+      {
+        "name": "installNetworkHooks",
+        "ok": true
+      },
+      {
+        "name": "composeEmail",
+        "ok": true
+      },
+      {
+        "name": "bookPreferredSlot",
+        "ok": true
+      },
+      {
+        "name": "resolveFieldValue",
+        "ok": true
+      }
+    ],
+    "popup": [
+      {
+        "name": "initTier4Panel",
+        "ok": true
+      },
+      {
+        "name": "refreshTier4Dashboard",
+        "ok": true
+      },
+      {
+        "name": "renderDashboard",
+        "ok": true
+      },
+      {
+        "name": "renderKnowledgeGraph",
+        "ok": true
+      },
+      {
+        "name": "renderReplaySlider",
+        "ok": true
+      },
+      {
+        "name": "loadOnboardingState",
+        "ok": true
+      },
+      {
+        "name": "showApprovalRequest",
+        "ok": true
+      }
+    ]
+  }
+}

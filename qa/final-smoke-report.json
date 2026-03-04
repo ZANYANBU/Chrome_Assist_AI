@@ -1,0 +1,42 @@
+{
+  "checklist": {
+    "popup": {
+      "popupOpensDark": false,
+      "inputAutoExpand": false,
+      "safeModeToggle": false,
+      "planModeToggle": false,
+      "quickActionsClickable": false,
+      "recentTasksRenders": false,
+      "settingsFlyoutOpens": false
+    },
+    "sidePanel": {
+      "sidePanelOpenCloseAltZ": false,
+      "navIconsClickable": false,
+      "eachViewRenders": false,
+      "dashboardHealthStats": false,
+      "agentViewAcceptsGoalInput": false
+    },
+    "coreAgent": {
+      "stepCardsAppear": false,
+      "progressBarFills": false,
+      "taskCompletes": false
+    },
+    "tier3": {
+      "createScheduledTask": false,
+      "saveBookmark": false,
+      "vaultSetPassphraseSaveCredentialAutoLogin": false
+    },
+    "tier4": {
+      "planCardAppears": false,
+      "agentTreeVisible": false,
+      "knowledgeGraphRenders": false,
+      "auditLogShowsEntries": false
+    },
+    "screenshots": []
+  },
+  "notes": [
+    "Launched browser channel: chrome",
+    "Extension ID not found from service worker or pages."
+  ],
+  "blocked": true
+}

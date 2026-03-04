@@ -4,7 +4,7 @@
   "short_name": "ZANYSURF",
   "author": "Anbuchelvan Valavan",
   "version": "1.0.1",
-  "description": "Autonomous AI browser agent powered by local Ollama or Gemini. Chain-of-thought reasoning, step-by-step navigation, and full browser control.",
+  "description": "AI browser agent with local Ollama or Gemini for guided autonomous web navigation and task automation.",
   "icons": {
     "16":  "icons/icon16.png",
     "48":  "icons/icon48.png",
@@ -14,7 +14,11 @@
     "activeTab",
     "scripting",
     "storage",
+    "declarativeNetRequest",
+    "alarms",
     "tabs",
+    "downloads",
+    "clipboardWrite",
     "contextMenus",
     "notifications",
     "sidePanel"
@@ -43,19 +47,31 @@
     }
   ],
   "host_permissions": [
+    "<all_urls>",
     "https://generativelanguage.googleapis.com/*",
     "http://localhost:11434/*",
     "http://127.0.0.1:11434/*",
-    "<all_urls>"
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
+    "https://api.groq.com/*",
+    "https://api.mistral.ai/*"
   ],
   "web_accessible_resources": [
     {
-      "resources": ["content.js"],
+      "resources": ["content.js", "dom-text-worker.js", "selftest.html"],
       "matches": ["<all_urls>"]
     }
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "commands": {
+    "toggle-sidepanel": {
+      "suggested_key": {
+        "default": "Alt+Z"
+      },
+      "description": "Toggle ZANYSURF side panel"
+    }
   }
 }
 

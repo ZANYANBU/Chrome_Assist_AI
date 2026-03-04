@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ZANYSURF Self-Test</title>
+  <style>
+    :root { --bg:#050505; --surface:#0d0d0d; --border:#1f1f1f; --green:#00ff88; --text:#f0f0f0; --muted:#888; --err:#ff4444; }
+    *{box-sizing:border-box} body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--text)}
+    .wrap{max-width:980px;margin:20px auto;padding:0 16px}
+    .head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+    h1{font-size:18px;margin:0}.status{font-size:12px;color:var(--muted)}
+    .actions{display:flex;gap:8px;margin-bottom:10px}
+    button{background:#141414;border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;cursor:pointer}
+    button:hover{border-color:rgba(0,255,136,.35)}
+    .summary{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surface);margin-bottom:10px}
+    .summary strong{color:var(--green)}
+    .list{display:grid;gap:8px}
+    .item{display:grid;grid-template-columns:160px 1fr auto;gap:10px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--surface)}
+    .id{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--muted)}
+    .name{font-size:13px}
+    .state{font-size:12px;padding:4px 8px;border-radius:999px;border:1px solid var(--border)}
+    .run{color:var(--muted)}.pass{color:var(--green)}.fail{color:var(--err)}
+    .spinner{display:inline-block;width:10px;height:10px;border:2px solid #444;border-top-color:var(--green);border-radius:50%;animation:spin .7s linear infinite;margin-right:6px}
+    .error{grid-column:1 / -1;font-size:12px;color:var(--err)}
+    .manual{margin-top:14px;border:1px dashed var(--border);border-radius:10px;padding:10px;color:var(--muted);font-size:12px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="head">
+      <h1>◈ ZANYSURF Self-Test</h1>
+      <div class="status" id="run-meta">Idle</div>
+    </div>
+    <div class="actions">
+      <button id="run-all">Run All Tests</button>
+      <button id="rerun-failed">Re-run Failed</button>
+      <button id="export-json">Export JSON Report</button>
+    </div>
+    <div class="summary" id="summary">Waiting to run tests...</div>
+    <div id="results" class="list"></div>
+    <div class="manual">
+      <strong>Manual reminder cards</strong>
+      <ul>
+        <li>Popup visual/theme validation and interaction flow</li>
+        <li>Side panel open/close and nav interaction walkthrough</li>
+        <li>End-to-end browsing automation with real tab state</li>
+        <li>Screenshot capture workflow for store listing</li>
+      </ul>
+    </div>
+  </div>
+  <script src="selftest.js"></script>
+</body>
+</html>

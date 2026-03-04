@@ -20,25 +20,518 @@ let agentAbort    = false;
 let actionHistory = [];
 let sessionGoal   = '';
 let globalMemoryContext = ''; // added for Long Context Memory
+let sessionMemory = [];
+let tabOrchestrationState = {
+  nodes: {},
+  dependencies: {},
+  extracted: {},
+  lastSynthesis: ''
+};
+const pendingApprovals = new Map();
+let activeRunContext = { silent: false, trigger: 'manual' };
+let currentAgentTree = [];
+let currentAgentRunId = null;
+let activeIframeContext = null;
+let credentialVaultSessionPassphrase = null;
+const recentEvents = [];
+const modelStats = {};
+let activeRunToken = 0;
+
+const MODEL_PROFILES = {
+  'llama3.2:1b': { speed: 'fast', quality: 'basic', recommended: 'simple tasks' },
+  'llama3.2': { speed: 'medium', quality: 'good', recommended: 'most tasks' },
+  'llama3': { speed: 'slow', quality: 'best-local', recommended: 'complex reasoning' },
+  'mistral': { speed: 'medium', quality: 'good', recommended: 'instruction following' },
+  'qwen2.5:3b': { speed: 'fast', quality: 'good', recommended: 'reliable JSON output' },
+  'deepseek-r1': { speed: 'slow', quality: 'excellent', recommended: 'complex multi-step planning' },
+  'codellama': { speed: 'medium', quality: 'specialized', recommended: 'code-heavy tasks' }
+};
+
+const PROVIDER_MODELS = {
+  ollama: ['llama3.2:1b','llama3.2','llama3','mistral','qwen2.5:3b','deepseek-r1','phi3','gemma2','codellama'],
+  gemini: ['gemini-1.5-flash','gemini-1.5-pro','gemini-2.0-flash-exp','gemini-2.5-pro-preview'],
+  openai: ['gpt-4o','gpt-4o-mini','gpt-4-turbo','gpt-3.5-turbo','o1-mini','o3-mini'],
+  claude: ['claude-opus-4-5','claude-sonnet-4-5','claude-haiku-4-5'],
+  groq: ['llama-3.3-70b-versatile','llama-3.1-8b-instant','mixtral-8x7b-32768','gemma2-9b-it'],
+  mistral: ['mistral-large-latest','mistral-small-latest','open-mistral-7b','open-mixtral-8x7b']
+};
+
+const EXECUTE_JS_PRESETS = [
+  'get_title',
+  'get_url',
+  'get_selection',
+  'get_meta_description',
+  'get_canonical_url',
+  'get_page_language',
+  'get_scroll_position',
+  'get_form_count',
+  'get_video_duration',
+  'get_article_text',
+  'is_logged_in',
+  'get_react_version',
+  'count_elements',
+  'get_computed_style'
+];
+
+const STORAGE_KEYS = {
+  AUDIT: 'zanysurf_audit_log',
+  GRAPH: 'zanysurf_knowledge_graph',
+  PROFILE: 'zanysurf_user_profile',
+  QUICK_RUNS: 'zanysurf_quick_runs',
+  BRIDGES: 'zanysurf_extension_bridges',
+  SAFE_MODE: 'zanysurf_safe_mode',
+  API_METRICS: 'zanysurf_api_metrics',
+  NETWORK_CACHE: 'zanysurf_network_cache',
+  LAST_SESSION: 'zanysurf_last_session_state',
+  CREDENTIAL_VAULT: 'zanysurf_credential_vault'
+};
+
+async function getSettings() {
+  const stored = await chrome.storage.local.get([
+    'provider', 'model', 'ollamaUrl', 'ollamaModel', 'apiKey',
+    'openaiModel', 'claudeModel', 'groqModel', 'mistralModel', 'geminiModel'
+  ]);
+  const provider = String(stored.provider || 'ollama').toLowerCase();
+  const providerModels = {
+    ollama: stored.ollamaModel || stored.model || 'llama3',
+    gemini: stored.geminiModel || stored.model || 'gemini-1.5-flash',
+    openai: stored.openaiModel || stored.model || 'gpt-4o-mini',
+    claude: stored.claudeModel || stored.model || 'claude-haiku-4-5',
+    groq: stored.groqModel || stored.model || 'llama-3.1-8b-instant',
+    mistral: stored.mistralModel || stored.model || 'mistral-small-latest'
+  };
+  const keyMap = await loadProviderApiKeys();
+  const providerKey = keyMap[provider] || '';
+
+  return {
+    ...stored,
+    provider,
+    model: providerModels[provider] || stored.model || providerModels.ollama,
+    providerKey,
+    keyMap,
+    apiKey: provider === 'gemini' ? (providerKey || stored.apiKey || '') : (stored.apiKey || ''),
+    ollamaUrl: stored.ollamaUrl || 'http://localhost:11434'
+  };
+}
+
+function recommendModel(goal, availableModels = []) {
+  const goalLower = String(goal || '').toLowerCase();
+  if (!Array.isArray(availableModels) || !availableModels.length) return null;
+
+  if (goalLower.includes('code') || goalLower.includes('script')) {
+    return findBestModel(availableModels, ['codellama', 'deepseek-r1', 'llama3']);
+  }
+  if (goalLower.includes('research') || goalLower.includes('analyze')) {
+    return findBestModel(availableModels, ['deepseek-r1', 'llama3', 'mistral']);
+  }
+  if (goalLower.includes('form') || goalLower.includes('fill')) {
+    return findBestModel(availableModels, ['qwen2.5:3b', 'mistral', 'llama3.2']);
+  }
+  return findBestModel(availableModels, ['llama3.2', 'mistral', 'llama3.2:1b']);
+}
+
+function findBestModel(availableModels, preferred) {
+  const available = availableModels.map(item => typeof item === 'string' ? item : item?.name).filter(Boolean);
+  for (const candidate of preferred) {
+    const found = available.find(model => model === candidate || model.startsWith(candidate + ':') || model.includes(candidate));
+    if (found) return found;
+  }
+  return available[0] || null;
+}
+
+function isRunTokenCurrent(runToken) {
+  return Number(runToken || activeRunToken) === activeRunToken;
+}
+
+function cancelActiveRun(reason = 'cancelled', clearHistory = false) {
+  activeRunToken += 1;
+  agentAbort = true;
+  agentActive = false;
+  currentAgentTree = [];
+
+  if (clearHistory) {
+    actionHistory = [];
+    sessionGoal = '';
+    sessionMemory = [];
+    tabOrchestrationState = { nodes: {}, dependencies: {}, extracted: {}, lastSynthesis: '' };
+  }
+
+  broadcast({
+    action: 'AGENT_STATUS',
+    status: 'stopped',
+    message: 'Run cancelled: ' + reason
+  });
+  return activeRunToken;
+}
+
+function startNewRun(reason = 'manual') {
+  const hadActiveRun = agentActive || actionHistory.length > 0 || !!sessionGoal || currentAgentTree.length > 0;
+  if (!hadActiveRun) {
+    activeRunToken += 1;
+    agentAbort = false;
+    return activeRunToken;
+  }
+
+  const nextToken = cancelActiveRun('superseded-' + reason, true);
+  agentAbort = false;
+  if (hadActiveRun) {
+    broadcast({
+      action: 'AGENT_STATUS',
+      status: 'running',
+      message: 'Starting fresh run (previous commands cleared).'
+    });
+  }
+  return nextToken;
+}
 
 // --- Message router ----------------------------------------------------------
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'RUN_AGENT') {
-    agentAbort = false;
-    runAgentLoop(request.prompt);
-    sendResponse({ status: 'started' });
+    const runToken = startNewRun('run-agent');
+    runAgentEntry(request.prompt, { ...(request.options || {}), runToken });
+    sendResponse({ status: 'started', runToken });
+    return true;
+  }
+  if (request.action === 'PING') {
+    sendResponse({ pong: true, ts: Date.now() });
+    return true;
+  }
+  if (request.action === 'GET_SETTINGS') {
+    getSettings().then(settings => {
+      sendResponse({
+        provider: settings.provider,
+        model: settings.model,
+        ollamaUrl: settings.ollamaUrl,
+        hasKey: !!settings.providerKey,
+        settings
+      });
+    }).catch(error => sendResponse({ error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_PROVIDER_LIST') {
+    sendResponse({ success: true, providers: Object.keys(PROVIDER_MODELS) });
+    return true;
+  }
+  if (request.action === 'GET_MODELS_FOR_PROVIDER') {
+    const provider = String(request.provider || '').toLowerCase();
+    const models = (PROVIDER_MODELS[provider] || []).map(name => ({ name, profile: MODEL_PROFILES[name] || null }));
+    sendResponse({ success: true, models });
+    return true;
+  }
+  if (request.action === 'DETECT_OLLAMA_MODELS') {
+    const url = String(request.ollamaUrl || 'http://localhost:11434');
+    detectOllamaModels(url)
+      .then(models => sendResponse({ success: true, models }))
+      .catch(error => sendResponse({ success: false, error: error.message, models: [] }));
+    return true;
+  }
+  if (request.action === 'TEST_PROVIDER_CONNECTION') {
+    getSettings().then(settings => {
+      const provider = String(request.provider || settings.provider || 'ollama');
+      return LLMGateway.testConnection(provider, settings);
+    }).then(result => sendResponse(result)).catch(error => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'STORE_PROVIDER_KEY') {
+    storeProviderApiKey(String(request.provider || ''), String(request.key || ''), String(request.passphrase || credentialVaultSessionPassphrase || ''))
+      .then(() => sendResponse({ success: true, ok: true }))
+      .catch(error => sendResponse({ success: false, ok: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_MODEL_PERFORMANCE') {
+    sendResponse({ success: true, stats: modelStats });
+    return true;
+  }
+  if (request.action === 'RECOMMEND_MODEL') {
+    const provider = String(request.provider || 'ollama').toLowerCase();
+    const available = Array.isArray(request.availableModels) && request.availableModels.length
+      ? request.availableModels
+      : (PROVIDER_MODELS[provider] || []);
+    const recommendation = recommendModel(String(request.goal || ''), available);
+    sendResponse({ success: true, recommendation });
+    return true;
+  }
+  if (request.action === 'RUN_MULTI_AGENT') {
+    const runToken = startNewRun('run-multi-agent');
+    runAgentEntry(request.prompt, { ...(request.options || {}), multiAgent: true, runToken });
+    sendResponse({ status: 'started', runToken });
+    return true;
+  }
+  if (request.action === 'GET_AGENT_TREE') {
+    sendResponse({ success: true, runId: currentAgentRunId, tree: currentAgentTree });
+    return true;
+  }
+  if (request.action === 'GET_AGENT_DASHBOARD') {
+    buildAgentDashboardSummary()
+      .then(summary => sendResponse({ success: true, summary }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'EXPORT_AUDIT_LOG') {
+    exportAuditLog().then(result => sendResponse(result)).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_KNOWLEDGE_GRAPH') {
+    getKnowledgeGraph().then(graph => sendResponse({ success: true, graph })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'SET_USER_PROFILE') {
+    setUserProfile(request.profile || {}).then(profile => sendResponse({ success: true, profile })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_USER_PROFILE') {
+    getUserProfile().then(profile => sendResponse({ success: true, profile })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'LIST_QUICKRUNS') {
+    listQuickRuns().then(goals => sendResponse({ success: true, goals })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'SAVE_GOAL_QUICKRUN') {
+    saveQuickRunGoal(request.goal || '').then(goals => sendResponse({ success: true, goals })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'TOGGLE_SAFE_MODE') {
+    toggleSafeMode(!!request.enabled).then(enabled => sendResponse({ success: true, enabled })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'SET_EXTENSION_BRIDGES') {
+    setExtensionBridges(request.bridges || []).then(bridges => sendResponse({ success: true, bridges })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'LIST_EXTENSION_BRIDGES') {
+    listExtensionBridges().then(bridges => sendResponse({ success: true, bridges })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GENERATE_STEP_REPLAY_REPORT') {
+    generateStepReplayHtml().then(html => sendResponse({ success: true, html })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'UNLOCK_CREDENTIAL_VAULT') {
+    unlockCredentialVault(request.passphrase || '').then(result => sendResponse(result)).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'VAULT_UNLOCK') {
+    unlockCredentialVault(request.passphrase || '')
+      .then(() => sendResponse({ ok: true, success: true }))
+      .catch(error => sendResponse({ ok: false, success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'VAULT_LOCK') {
+    lockCredentialVault();
+    sendResponse({ ok: true, success: true });
+    return true;
+  }
+  if (request.action === 'SAVE_CREDENTIAL') {
+    saveCredentialEntry({
+      site: request.site,
+      username: request.username,
+      password: request.password,
+      passphrase: request.passphrase,
+      notes: request.notes || ''
+    }).then(result => sendResponse({ success: true, entry: result })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'LIST_CREDENTIALS') {
+    listCredentialEntries().then(entries => sendResponse({ success: true, entries })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'DELETE_CREDENTIAL') {
+    deleteCredentialEntry(request.id).then(() => sendResponse({ success: true })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'LOGIN_WITH_CREDENTIAL') {
+    loginWithSavedCredential(request).then(result => sendResponse({ success: true, result })).catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'CREATE_SCHEDULED_TASK') {
+    SchedulerEngine.createTask({ goal: request.goal, schedule: request.schedule })
+      .then(task => sendResponse({ success: true, task }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'CREATE_SCHEDULE') {
+    SchedulerEngine.createTask({ goal: request.goal, schedule: request.schedule })
+      .then(task => sendResponse({ success: true, task, id: task.id }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_SCHEDULES') {
+    SchedulerEngine.listTasks()
+      .then(schedules => sendResponse({ success: true, schedules }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'DELETE_SCHEDULE') {
+    SchedulerEngine.deleteTask(request.id)
+      .then(() => sendResponse({ success: true, ok: true }))
+      .catch(error => sendResponse({ success: false, ok: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'LIST_SCHEDULED_TASKS') {
+    SchedulerEngine.listTasks()
+      .then(tasks => sendResponse({ success: true, tasks }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'UPDATE_SCHEDULED_TASK') {
+    SchedulerEngine.updateTask(request.taskId, request.patch || {})
+      .then(task => sendResponse({ success: true, task }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'DELETE_SCHEDULED_TASK') {
+    SchedulerEngine.deleteTask(request.taskId)
+      .then(() => sendResponse({ success: true }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'RUN_SCHEDULED_TASK_NOW') {
+    SchedulerEngine.runTaskNow(request.taskId)
+      .then(result => sendResponse({ success: true, result }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'APPROVAL_RESPONSE') {
+    const resolver = pendingApprovals.get(request.requestId);
+    if (resolver) {
+      pendingApprovals.delete(request.requestId);
+      resolver(!!request.approved);
+    }
+    sendResponse({ success: true });
+    return true;
+  }
+  if (request.action === 'SAVE_SMART_BOOKMARK') {
+    SmartBookmarks.save(request.name, request.url, request.context || '')
+      .then(bookmark => sendResponse({ success: true, bookmark, id: bookmark.id }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'SAVE_BOOKMARK') {
+    SmartBookmarks.save(request.name, request.url, request.context || '')
+      .then(bookmark => sendResponse({ success: true, bookmark, id: bookmark.id }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'LIST_SMART_BOOKMARKS') {
+    SmartBookmarks.list()
+      .then(bookmarks => sendResponse({ success: true, bookmarks }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'REPLAY_WORKFLOW') {
+    replayWorkflow(request.workflowId)
+      .then(result => sendResponse({ success: true, result }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'LIST_WORKFLOWS') {
+    listWorkflows().then(workflows => sendResponse({ success: true, workflows }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_WORKFLOWS') {
+    listWorkflows().then(workflows => sendResponse({ success: true, workflows }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_BOOKMARKS') {
+    SmartBookmarks.list()
+      .then(bookmarks => sendResponse({ success: true, bookmarks }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_MEMORY_CONTEXT') {
+    retrieveMemoryContext(String(request.goal || request.prompt || 'session'))
+      .then(context => {
+        const lines = String(context || '').split('\n').map(s => s.trim()).filter(Boolean);
+        sendResponse({ success: true, memory: lines, memories: lines });
+      })
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'APPEND_AUDIT_LOG') {
+    appendAuditLog(request.entry || {})
+      .then(() => sendResponse({ ok: true, success: true }))
+      .catch(error => sendResponse({ ok: false, success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_SESSION_STATE') {
+    chrome.storage.local.get([STORAGE_KEYS.LAST_SESSION])
+      .then(stored => {
+        const state = stored[STORAGE_KEYS.LAST_SESSION] || null;
+        sendResponse({ success: true, state, ...(state || {}) });
+      })
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_API_METRICS') {
+    chrome.storage.local.get([STORAGE_KEYS.API_METRICS])
+      .then(stored => {
+        const metrics = stored[STORAGE_KEYS.API_METRICS] || {};
+        const payload = { ...metrics, callCount: Number(metrics.calls || 0) };
+        sendResponse({ success: true, metrics: payload, ...payload });
+      })
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'CHECK_RATE_LIMIT') {
+    const callCount = Number(request.callCount || 0);
+    sendResponse({ success: true, exceeded: callCount > 100, provider: request.provider || 'unknown', callCount });
+    return true;
+  }
+  if (request.action === 'SET_SAFE_MODE') {
+    toggleSafeMode(!!request.enabled)
+      .then(enabled => sendResponse({ success: true, enabled, safeMode: enabled }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_SAFE_MODE') {
+    getSafeMode()
+      .then(enabled => sendResponse({ success: true, enabled, safeMode: enabled }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'TEST_ERROR_CLASSIFICATION') {
+    const probe = classifyAgentError(new Error(String(request.errorMessage || request.message || 'network timeout')));
+    sendResponse({ success: true, classification: probe, type: probe.type, message: probe.message });
+    return true;
+  }
+  if (request.action === 'DELETE_BOOKMARK') {
+    SmartBookmarks.deleteById(request.id)
+      .then(() => sendResponse({ success: true, ok: true }))
+      .catch(error => sendResponse({ success: false, ok: false, error: error.message }));
+    return true;
+  }
+  if (request.action === 'GET_RECENT_EVENTS') {
+    sendResponse({ success: true, events: recentEvents.slice(-200) });
     return true;
   }
   if (request.action === 'STOP_AGENT') {
-    agentAbort = true;
-    agentActive = false;
-    sendResponse({ status: 'stopped' });
+    cancelActiveRun('stop-agent', false);
+    sendResponse({ status: 'stopped', runToken: activeRunToken });
+    return true;
+  }
+  if (request.action === 'CANCEL_AND_CLEAR') {
+    cancelActiveRun('cancel-and-clear', true);
+    sendResponse({ status: 'cancelled', runToken: activeRunToken });
     return true;
   }
   if (request.action === 'CLEAR_MEMORY') {
+    cancelActiveRun('clear-memory', true);
     actionHistory = [];
     sessionGoal   = '';
+    sessionMemory = [];
+    tabOrchestrationState = { nodes: {}, dependencies: {}, extracted: {}, lastSynthesis: '' };
     sendResponse({ status: 'cleared' });
+    return true;
+  }
+  if (request.action === 'GET_MEMORY_SUMMARY') {
+    getMemorySummary().then(summary => sendResponse({ summary })).catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+  if (request.action === 'EXPORT_LAST_CSV') {
+    exportLatestCsv().then(result => sendResponse(result)).catch(err => sendResponse({ success: false, error: err.message }));
     return true;
   }
   if (request.action === 'GET_STATUS') {
@@ -47,18 +540,831 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
+chrome.commands?.onCommand.addListener((command) => {
+  if (command === 'toggle-sidepanel') {
+    chrome.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
+      const tab = tabs[0];
+      if (!tab?.id) return;
+      chrome.sidePanel?.open({ tabId: tab.id }).catch(() => {});
+    }).catch(() => {});
+  }
+});
+
+// =============================================================================
+// TASK SCHEDULER (CHROME ALARMS)
+// =============================================================================
+const SchedulerEngine = {
+  storageKey: 'zanysurf_scheduled_tasks',
+
+  async createTask(config) {
+    const task = {
+      id: crypto.randomUUID(),
+      goal: config.goal,
+      schedule: config.schedule,
+      lastRun: null,
+      nextRun: this.calculateNextRun(config.schedule),
+      enabled: true,
+      runCount: 0,
+      results: []
+    };
+    const tasks = await this.listTasks();
+    tasks.push(task);
+    await chrome.storage.local.set({ [this.storageKey]: tasks });
+    await this.registerAlarm(task);
+    return task;
+  },
+
+  async listTasks() {
+    const stored = await chrome.storage.local.get([this.storageKey]);
+    return stored[this.storageKey] || [];
+  },
+
+  async getTask(taskId) {
+    const tasks = await this.listTasks();
+    return tasks.find(task => task.id === taskId) || null;
+  },
+
+  async updateTask(taskId, patch) {
+    const tasks = await this.listTasks();
+    const index = tasks.findIndex(task => task.id === taskId);
+    if (index === -1) throw new Error('Scheduled task not found.');
+
+    tasks[index] = { ...tasks[index], ...patch };
+    if (patch.schedule) {
+      tasks[index].nextRun = this.calculateNextRun(patch.schedule);
+    }
+    await chrome.storage.local.set({ [this.storageKey]: tasks });
+
+    if (tasks[index].enabled) {
+      await this.registerAlarm(tasks[index]);
+    } else {
+      chrome.alarms.clear('scheduled_' + taskId);
+    }
+    return tasks[index];
+  },
+
+  async deleteTask(taskId) {
+    const tasks = await this.listTasks();
+    const filtered = tasks.filter(task => task.id !== taskId);
+    await chrome.storage.local.set({ [this.storageKey]: filtered });
+    chrome.alarms.clear('scheduled_' + taskId);
+  },
+
+  async registerAlarm(task) {
+    if (!task.enabled) return;
+    const periodInMinutes = this.getPeriodMinutes(task.schedule);
+    const alarm = {
+      when: task.nextRun
+    };
+    if (periodInMinutes) {
+      alarm.periodInMinutes = periodInMinutes;
+    }
+    chrome.alarms.create('scheduled_' + task.id, alarm);
+  },
+
+  getPeriodMinutes(schedule) {
+    const text = String(schedule || '').toLowerCase();
+    if (text.startsWith('interval@')) {
+      const raw = text.replace('interval@', '').trim();
+      if (raw.endsWith('m')) return Number(raw.replace('m', ''));
+      if (raw.endsWith('h')) return Number(raw.replace('h', '')) * 60;
+      return Number(raw) || null;
+    }
+    if (text.startsWith('daily@')) return 1440;
+    if (text.startsWith('weekly@')) return 10080;
+    return null;
+  },
+
+  calculateNextRun(schedule) {
+    const now = new Date();
+    const text = String(schedule || '').toLowerCase().trim();
+
+    if (text.startsWith('interval@')) {
+      const raw = text.replace('interval@', '').trim();
+      const minutes = raw.endsWith('h')
+        ? Number(raw.replace('h', '')) * 60
+        : Number(raw.replace('m', ''));
+      return Date.now() + (Math.max(minutes || 30, 1) * 60000);
+    }
+
+    if (text.startsWith('daily@')) {
+      const [hours, minutes] = parseTimeToHourMinute(text.replace('daily@', ''));
+      const next = new Date(now);
+      next.setHours(hours, minutes, 0, 0);
+      if (next.getTime() <= Date.now()) next.setDate(next.getDate() + 1);
+      return next.getTime();
+    }
+
+    if (text.startsWith('weekly@')) {
+      const value = text.replace('weekly@', '').trim();
+      const parts = value.split(/\s+/).filter(Boolean);
+      const dayToken = parts[0] || 'mon';
+      const [hours, minutes] = parseTimeToHourMinute(parts[1] || '9am');
+      const dayMap = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+      const targetDay = dayMap[dayToken.substring(0, 3)] ?? 1;
+      const next = new Date(now);
+      next.setHours(hours, minutes, 0, 0);
+      const delta = (targetDay - next.getDay() + 7) % 7;
+      next.setDate(next.getDate() + (delta === 0 && next.getTime() <= Date.now() ? 7 : delta));
+      return next.getTime();
+    }
+
+    return Date.now() + (30 * 60000);
+  },
+
+  async updateLastRun(taskId, result) {
+    const tasks = await this.listTasks();
+    const index = tasks.findIndex(task => task.id === taskId);
+    if (index === -1) return;
+
+    const current = tasks[index];
+    const snapshot = {
+      ts: Date.now(),
+      success: !!result.success,
+      summary: result.summary || result.message || 'Completed',
+      duration: result.duration || 0
+    };
+    current.lastRun = snapshot.ts;
+    current.runCount = (current.runCount || 0) + 1;
+    current.results = [snapshot, ...(current.results || [])].slice(0, 20);
+    current.nextRun = this.calculateNextRun(current.schedule);
+
+    tasks[index] = current;
+    await chrome.storage.local.set({ [this.storageKey]: tasks });
+    await this.registerAlarm(current);
+  },
+
+  async runTaskNow(taskId) {
+    const task = await this.getTask(taskId);
+    if (!task) throw new Error('Task not found.');
+    const result = await runAgentWithPlanning(task.goal, { silent: true, trigger: 'schedule' });
+    await this.updateLastRun(taskId, result || {});
+    return result;
+  }
+};
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (!alarm.name.startsWith('scheduled_')) return;
+  const taskId = alarm.name.replace('scheduled_', '');
+  const task = await SchedulerEngine.getTask(taskId);
+  if (!task || !task.enabled) return;
+
+  const result = await runAgentWithPlanning(task.goal, { silent: true, trigger: 'schedule' });
+  await SchedulerEngine.updateLastRun(taskId, result || {});
+  chrome.notifications.create({
+    type: 'basic',
+    title: 'ZANYSURF — Scheduled Task Complete',
+    message: (result && (result.summary || result.message)) || 'Scheduled task completed.',
+    iconUrl: 'icons/icon48.png'
+  });
+});
+
+async function parseScheduleFromGoal(input, settings) {
+  const text = String(input || '').trim();
+  const lower = text.toLowerCase();
+
+  const intervalMatch = lower.match(/every\s+(\d+)\s*(minute|minutes|hour|hours)/i);
+  if (intervalMatch) {
+    const amount = Number(intervalMatch[1]);
+    const unit = intervalMatch[2].toLowerCase().startsWith('hour') ? 'h' : 'm';
+    return {
+      hasSchedule: true,
+      schedule: unit === 'h' ? ('interval@' + amount + 'h') : ('interval@' + amount + 'm'),
+      goal: stripScheduleLanguage(text)
+    };
+  }
+
+  const dailyMatch = lower.match(/every\s+(morning|afternoon|evening|night)|daily\s+at\s+([0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?)/i);
+  if (dailyMatch) {
+    const slot = (dailyMatch[1] || '').toLowerCase();
+    const time = dailyMatch[2] || (slot === 'morning' ? '9am' : slot === 'afternoon' ? '2pm' : slot === 'evening' ? '7pm' : '9pm');
+    return { hasSchedule: true, schedule: 'daily@' + normalizeTimeToken(time), goal: stripScheduleLanguage(text) };
+  }
+
+  const weeklyMatch = lower.match(/weekly\s+@?\s*(sun|mon|tue|wed|thu|fri|sat)(?:\s+([0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?))?/i);
+  if (weeklyMatch) {
+    return {
+      hasSchedule: true,
+      schedule: 'weekly@' + weeklyMatch[1] + ' ' + normalizeTimeToken(weeklyMatch[2] || '9am'),
+      goal: stripScheduleLanguage(text)
+    };
+  }
+
+  if (settings?.provider && /every|daily|weekly|each morning|each evening/i.test(lower)) {
+    try {
+      const prompt = 'Extract schedule and task from: "' + text + '". Return JSON: {"schedule":"daily@9am|weekly@mon 9am|interval@30m","goal":"task goal","hasSchedule":true|false}';
+      const response = await callPlanningLLM(prompt, settings);
+      const parsed = parseMaybeJson(response) || extractJSON(response);
+      if (parsed && parsed.hasSchedule && parsed.schedule && parsed.goal) {
+        return parsed;
+      }
+    } catch (_) {}
+  }
+
+  return { hasSchedule: false, schedule: null, goal: text };
+}
+
+function stripScheduleLanguage(text) {
+  return text
+    .replace(/every\s+(morning|afternoon|evening|night)/ig, '')
+    .replace(/every\s+\d+\s*(minute|minutes|hour|hours)/ig, '')
+    .replace(/daily\s+at\s+[0-9: ]+(am|pm)?/ig, '')
+    .replace(/weekly\s+@?\s*(sun|mon|tue|wed|thu|fri|sat)(?:\s+[0-9: ]+(am|pm)?)?/ig, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeTimeToken(value) {
+  const text = String(value || '9am').trim().toLowerCase();
+  if (/^\d{1,2}(?::\d{2})?(am|pm)$/.test(text)) return text;
+  if (/^\d{1,2}$/.test(text)) return text + 'am';
+  return text.replace(/\s+/g, '');
+}
+
+function parseTimeToHourMinute(token) {
+  const value = normalizeTimeToken(token);
+  const match = value.match(/^(\d{1,2})(?::(\d{2}))?(am|pm)?$/i);
+  if (!match) return [9, 0];
+  let hours = Number(match[1]);
+  const minutes = Number(match[2] || 0);
+  const meridian = (match[3] || '').toLowerCase();
+  if (meridian === 'pm' && hours < 12) hours += 12;
+  if (meridian === 'am' && hours === 12) hours = 0;
+  return [hours % 24, Math.min(Math.max(minutes, 0), 59)];
+}
+
+async function runAgentEntry(prompt, options = {}) {
+  const safePrompt = String(prompt || '').trim();
+  if (!safePrompt) {
+    broadcast({ action: 'AGENT_ERROR', error: 'Please provide a goal.' });
+    return;
+  }
+
+  currentAgentRunId = crypto.randomUUID();
+  const runToken = Number(options.runToken || activeRunToken);
+  if (!isRunTokenCurrent(runToken)) return;
+  currentAgentTree = [];
+  const resumed = await detectGoalContinuation(safePrompt);
+  if (!isRunTokenCurrent(runToken) || agentAbort) return;
+  if (resumed?.isContinuation) {
+    broadcast({
+      action: 'AGENT_STATUS',
+      status: 'running',
+      message: 'Resume mode: continuing prior context from ' + (resumed.lastUrl || 'previous session')
+    });
+  }
+
+  try {
+    await saveQuickRunGoal(safePrompt);
+    let result;
+    const shouldUseOrchestrator = !!options.multiAgent || /research|compare|analyze|summary|report|draft|write/i.test(safePrompt);
+    if (shouldUseOrchestrator) {
+      result = await OrchestratorAgent.run(safePrompt, { ...options, runId: currentAgentRunId, runToken });
+    } else {
+      result = await runAgentWithPlanning(safePrompt, { ...options, runToken });
+    }
+    if (!isRunTokenCurrent(runToken) || agentAbort) return;
+    await persistSessionState({ prompt: safePrompt, result, completed: true });
+  } catch (error) {
+    if (!isRunTokenCurrent(runToken)) return;
+    const classified = classifyAgentError(error);
+    broadcast({ action: 'AGENT_ERROR', error: classified.message });
+    await persistSessionState({ prompt: safePrompt, completed: false, error: classified.type });
+  }
+}
+
+const AgentBus = (() => {
+  const TYPES = new Set(['RESULT', 'ERROR', 'PROGRESS']);
+
+  function normalizeEnvelope(envelope = {}) {
+    return {
+      from: String(envelope.from || 'UnknownAgent'),
+      to: String(envelope.to || 'OrchestratorAgent'),
+      type: TYPES.has(String(envelope.type || 'PROGRESS')) ? String(envelope.type) : 'PROGRESS',
+      taskId: String(envelope.taskId || 'global'),
+      payload: envelope.payload ?? null
+    };
+  }
+
+  function publish(envelope = {}) {
+    const env = normalizeEnvelope(envelope);
+    const ts = Date.now();
+    broadcast({
+      action: 'AGENT_BUS_EVENT',
+      runId: currentAgentRunId,
+      ts,
+      envelope: env,
+      from: env.from,
+      to: env.to,
+      type: env.type,
+      taskId: env.taskId,
+      payload: env.payload
+    });
+    appendAuditLog({ kind: 'agent_bus', envelope: env, ts }).catch(() => {});
+    return env;
+  }
+
+  function progress(from, to, taskId, payload) {
+    return publish({ from, to, type: 'PROGRESS', taskId, payload });
+  }
+
+  function result(from, to, taskId, payload) {
+    return publish({ from, to, type: 'RESULT', taskId, payload });
+  }
+
+  function error(from, to, taskId, payload) {
+    return publish({ from, to, type: 'ERROR', taskId, payload });
+  }
+
+  return { publish, progress, result, error };
+})();
+
+const InterAgentBus = {
+  send(envelope = {}) {
+    return AgentBus.publish(envelope);
+  }
+};
+
+async function triggerLazyLoadScroll(tabId) {
+  if (!tabId) return false;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
+    await chrome.tabs.sendMessage(tabId, { action: 'GET_DOM', options: { lazyLoad: true } }).catch(() => {});
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+const ActionAgent = {
+  async run(subtask, context = {}) {
+    const goal = typeof subtask === 'string' ? subtask : (subtask.task || subtask.goal || 'Execute browser task');
+    const result = await runAgentLoop(goal + (context.parentGoal ? ('\nParent goal: ' + context.parentGoal) : ''), {
+      silentSubtask: true,
+      maxSteps: Math.min(context.maxSteps || 10, 20),
+      subtask,
+      parentGoal: context.parentGoal || goal,
+      runToken: context.runToken
+    });
+    const sitesVisited = [...new Set((actionHistory || []).map(item => trimHost(item.url || '')).filter(Boolean))];
+    return {
+      success: !!result.success,
+      result: result.message || result.summary || '',
+      stepsUsed: result.steps || 0,
+      siteVisited: sitesVisited
+    };
+  }
+};
+
+const ResearchAgent = {
+  async run(task, context = {}) {
+    const goal = task.task || task.goal || '';
+    const seeds = extractResearchUrls(goal);
+    const tabs = await Promise.all(seeds.map(async (url) => {
+      try {
+        const tab = await chrome.tabs.create({ url, active: false });
+        await waitForTabReady(tab.id);
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }).catch(() => {});
+        const page = await chrome.tabs.sendMessage(tab.id, { action: 'READ_PAGE' }).catch(() => ({ text: '', title: '', url }));
+        const extract = await chrome.tabs.sendMessage(tab.id, { action: 'EXECUTE', command: { action: 'extract_data', value: 'research' } }).catch(() => null);
+        return {
+          tabId: tab.id,
+          url,
+          title: page?.title || '',
+          text: (page?.text || '').substring(0, 2000),
+          extract: parseMaybeJson(extract?.result || ''),
+          credibility: scoreDomainCredibility(url)
+        };
+      } catch (_) {
+        return { tabId: null, url, title: '', text: '', extract: null, credibility: scoreDomainCredibility(url) * 0.5 };
+      }
+    }));
+
+    const dedupedFacts = dedupeFacts(
+      tabs.flatMap(item => collectFactsFromResearchItem(item))
+    );
+    const avgCred = tabs.length ? tabs.reduce((sum, item) => sum + (item.credibility || 0), 0) / tabs.length : 0;
+
+    AgentBus.result('ResearchAgent', 'OrchestratorAgent', task.id || 'research', {
+      sources: tabs.length,
+      facts: dedupedFacts.length
+    });
+    return {
+      facts: dedupedFacts,
+      sources: tabs.map(item => ({ url: item.url, title: item.title, credibility: item.credibility })),
+      confidence: Number(Math.max(0.2, Math.min(0.95, avgCred)).toFixed(2))
+    };
+  }
+};
+
+const AnalysisAgent = {
+  async run(task, context = {}) {
+    const settings = await getSettings();
+    const payload = context.research || task.input || {};
+    const claims = (payload.facts || []).slice(0, 20);
+    const prompt = [
+      'You are AnalysisAgent. Synthesize claims and detect contradictions.',
+      'Return JSON only: {"summary":"...","claims":[{"text":"...","confidence":0-1,"sourceCount":number}],"contradictions":[{"a":"...","b":"...","reason":"..."}]}',
+      JSON.stringify({ claims, sources: payload.sources || [] }, null, 2)
+    ].join('\n\n');
+
+    let parsed = { summary: '', claims: [], contradictions: [] };
+    try {
+      const raw = await LLMGateway.callText(prompt, settings.provider, settings.model, settings, { mode: 'summary' });
+      parsed = parseMaybeJson(raw) || parsed;
+    } catch (_) {}
+
+    const fallbackClaims = claims.slice(0, 8).map(text => ({ text, confidence: 0.62, sourceCount: 1 }));
+    const contradictions = detectContradictionsFromClaims(claims);
+    const report = {
+      summary: parsed.summary || ('Analyzed ' + claims.length + ' claims across ' + ((payload.sources || []).length) + ' sources.'),
+      claims: (parsed.claims && parsed.claims.length ? parsed.claims : fallbackClaims).map(item => ({
+        text: item.text,
+        confidence: Number(Math.max(0, Math.min(1, Number(item.confidence || 0.6))).toFixed(2)),
+        sourceCount: Number(item.sourceCount || 1)
+      })),
+      contradictions: (parsed.contradictions && parsed.contradictions.length) ? parsed.contradictions : contradictions
+    };
+    AgentBus.result('AnalysisAgent', 'OrchestratorAgent', task.id || 'analysis', {
+      claims: report.claims.length,
+      contradictions: report.contradictions.length
+    });
+    return report;
+  }
+};
+
+const WriterAgent = {
+  async run(task, context = {}) {
+    const destination = inferWriterDestination(task.task || task.goal || '');
+    const content = buildStructuredWriteContent(context.analysis || {}, context.research || {});
+    const tab = await chrome.tabs.create({ url: destination, active: true });
+    await waitForTabReady(tab.id);
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }).catch(() => {});
+    await sleep(450);
+
+    const sections = splitMarkdownSections(content);
+    let written = 0;
+    for (const section of sections) {
+      await chrome.tabs.sendMessage(tab.id, {
+        action: 'EXECUTE',
+        command: {
+          action: 'fill_form',
+          value: JSON.stringify({
+            body: section.plain,
+            content: section.plain,
+            title: (context.analysis?.summary || task.task || '').substring(0, 80)
+          })
+        }
+      }).catch(() => {});
+      written++;
+      AgentBus.progress('WriterAgent', 'OrchestratorAgent', task.id || 'writer', {
+        written,
+        total: sections.length
+      });
+      await sleep(180);
+    }
+
+    return { success: true, destination, sectionsWritten: written, contentLength: content.length };
+  }
+};
+
+const OrchestratorAgent = {
+  async run(goal, options = {}) {
+    const runToken = Number(options.runToken || activeRunToken);
+    if (!isRunTokenCurrent(runToken) || agentAbort) {
+      return { success: false, summary: 'Run cancelled.', outputs: {} };
+    }
+
+    const plan = await this.decomposeGoal(goal);
+    currentAgentTree = plan.steps.map(step => ({
+      id: step.id,
+      task: step.task,
+      type: step.agent,
+      status: 'pending',
+      dependsOn: step.dependsOn || []
+    }));
+    broadcast({ action: 'AGENT_TREE', runId: options.runId || currentAgentRunId, tree: currentAgentTree });
+
+    const outputs = {};
+    const completed = new Set();
+    let guard = 0;
+
+    while (completed.size < plan.steps.length && guard < 12 && isRunTokenCurrent(runToken) && !agentAbort) {
+      guard++;
+      const ready = plan.steps.filter(step => !completed.has(step.id) && (step.dependsOn || []).every(dep => completed.has(dep)));
+      if (!ready.length) break;
+
+      const independent = ready.filter(step => !(step.dependsOn || []).length);
+      const dependent = ready.filter(step => (step.dependsOn || []).length);
+
+      if (independent.length) {
+        await Promise.all(independent.map(async (step) => {
+          if (!isRunTokenCurrent(runToken) || agentAbort) return;
+          const output = await this.runStep(step, goal, outputs, runToken);
+          outputs[step.id] = output;
+          completed.add(step.id);
+        }));
+      }
+
+      for (const step of dependent) {
+        if (!isRunTokenCurrent(runToken) || agentAbort) break;
+        const output = await this.runStep(step, goal, outputs, runToken);
+        outputs[step.id] = output;
+        completed.add(step.id);
+      }
+    }
+
+    if (!isRunTokenCurrent(runToken) || agentAbort) {
+      return { success: false, summary: 'Run cancelled.', outputs };
+    }
+
+    const finalSummary = await synthesizePlanResults(goal, Object.values(outputs), await getSettings());
+    broadcast({ action: 'AGENT_COMPLETE', result: finalSummary, steps: actionHistory.length });
+    return { success: true, summary: finalSummary, outputs };
+  },
+
+  async decomposeGoal(goal) {
+    const researchHeavy = /research|compare|sources|claims|report|brief/i.test(goal);
+    if (researchHeavy) {
+      return {
+        steps: [
+          { id: 'a1', agent: 'research', task: 'Research across multiple sources for: ' + goal, dependsOn: [] },
+          { id: 'a2', agent: 'analysis', task: 'Analyze and detect contradictions', dependsOn: ['a1'] },
+          { id: 'a3', agent: 'writer', task: 'Draft structured output document', dependsOn: ['a2'] }
+        ]
+      };
+    }
+    return {
+      steps: [
+        { id: 'a1', agent: 'action', task: goal, dependsOn: [] }
+      ]
+    };
+  },
+
+  async runStep(step, goal, outputs, runToken) {
+    if (!isRunTokenCurrent(runToken) || agentAbort) {
+      return { success: false, message: 'Run cancelled.', result: null, steps: 0 };
+    }
+    updateAgentTreeNode(step.id, { status: 'running' });
+    AgentBus.progress('OrchestratorAgent', step.agent + 'Agent', step.id, {
+      phase: 'start',
+      task: step.task,
+      agent: step.agent
+    });
+    try {
+      let output;
+      if (step.agent === 'research') output = await ResearchAgent.run(step, { goal });
+      else if (step.agent === 'analysis') output = await AnalysisAgent.run(step, { goal, research: outputs.a1 || outputs[(step.dependsOn || [])[0]] });
+      else if (step.agent === 'writer') output = await WriterAgent.run(step, { goal, analysis: outputs.a2 || outputs[(step.dependsOn || [])[0]], research: outputs.a1 });
+      else output = await ActionAgent.run(step, { parentGoal: goal, maxSteps: 16, runToken });
+
+      if (!isRunTokenCurrent(runToken) || agentAbort) {
+        return { success: false, message: 'Run cancelled.', result: null, steps: 0 };
+      }
+
+      updateAgentTreeNode(step.id, { status: 'completed', outputPreview: JSON.stringify(output).substring(0, 240) });
+      AgentBus.result(step.agent + 'Agent', 'OrchestratorAgent', step.id, { success: true });
+      return { success: true, message: step.task, result: output, steps: output?.stepsUsed || 0 };
+    } catch (error) {
+      updateAgentTreeNode(step.id, { status: 'failed', error: error.message });
+      AgentBus.error(step.agent + 'Agent', 'OrchestratorAgent', step.id, {
+        success: false,
+        error: error.message
+      });
+      return { success: false, message: error.message, result: null, steps: 0 };
+    }
+  }
+};
+
+function updateAgentTreeNode(stepId, patch) {
+  currentAgentTree = currentAgentTree.map(node => node.id === stepId ? { ...node, ...patch } : node);
+  broadcast({ action: 'AGENT_TREE', runId: currentAgentRunId, tree: currentAgentTree });
+}
+
+// =============================================================================
+// PLANNING LAYER (PLAN-AND-EXECUTE)
+// =============================================================================
+async function runAgentWithPlanning(goal, options = {}) {
+  const startedAt = Date.now();
+  const runToken = Number(options.runToken || activeRunToken);
+  if (!isRunTokenCurrent(runToken) || agentAbort) {
+    return { success: false, summary: 'Run cancelled.', message: 'Run cancelled.', duration: 0, steps: 0, results: [] };
+  }
+
+  activeRunContext = { silent: !!options.silent, trigger: options.trigger || 'manual' };
+  const settings = await getSettings();
+  if (!isRunTokenCurrent(runToken) || agentAbort) {
+    return { success: false, summary: 'Run cancelled.', message: 'Run cancelled.', duration: Date.now() - startedAt, steps: 0, results: [] };
+  }
+  const scheduleIntent = await parseScheduleFromGoal(goal, settings);
+  if (scheduleIntent.hasSchedule && !options.ignoreScheduleIntent) {
+    const task = await SchedulerEngine.createTask({ goal: scheduleIntent.goal || goal, schedule: scheduleIntent.schedule });
+    broadcast({ action: 'AGENT_SCHEDULED', task });
+    return {
+      success: true,
+      summary: 'Scheduled task created: ' + task.schedule,
+      message: 'Scheduled task created.',
+      duration: Date.now() - startedAt
+    };
+  }
+
+  const plan = await generatePlan(goal, settings);
+  if (!options.silent) {
+    broadcast({ action: 'AGENT_PLAN', goal, plan });
+  }
+
+  const results = [];
+  let currentSteps = [...(plan.steps || [])];
+
+  for (let index = 0; index < currentSteps.length; index++) {
+    if (agentAbort || !isRunTokenCurrent(runToken)) break;
+
+    const step = currentSteps[index];
+    if (!options.silent) {
+      broadcast({ action: 'AGENT_PLAN_PROGRESS', status: 'running', stepId: step.id, task: step.task, index: index + 1, total: currentSteps.length });
+    }
+
+    const subtaskGoal = 'Subtask ' + (index + 1) + '/' + currentSteps.length + ': ' + step.task + '\nParent goal: ' + goal;
+    const result = await runAgentLoop(subtaskGoal, {
+      silentSubtask: true,
+      maxSteps: 10,
+      subtask: step,
+      parentGoal: goal,
+      runToken
+    });
+    results.push({ ...result, subtask: step });
+
+    if (agentAbort || !isRunTokenCurrent(runToken)) break;
+
+    if (!options.silent) {
+      broadcast({
+        action: 'AGENT_PLAN_PROGRESS',
+        status: result.success ? 'completed' : 'failed',
+        stepId: step.id,
+        task: step.task,
+        detail: result.message,
+        index: index + 1,
+        total: currentSteps.length
+      });
+    }
+
+    if (!result.success && !agentAbort) {
+      const replanned = await replan(goal, { steps: currentSteps }, results, settings);
+      if (replanned && replanned.steps && replanned.steps.length) {
+        const completedPrefix = currentSteps.slice(0, index + 1);
+        currentSteps = [...completedPrefix, ...replanned.steps.filter(item => !completedPrefix.some(done => done.id === item.id))];
+        if (!options.silent) {
+          broadcast({ action: 'AGENT_PLAN', goal, plan: { steps: currentSteps }, replanned: true });
+        }
+      }
+    }
+  }
+
+  const wasCancelled = agentAbort || !isRunTokenCurrent(runToken);
+  const summary = wasCancelled ? 'Run cancelled by user.' : await synthesizePlanResults(goal, results, settings);
+  const totalSteps = results.reduce((sum, item) => sum + (item.steps || 0), 0);
+  const duration = Date.now() - startedAt;
+  const success = !wasCancelled && results.every(item => item.success);
+
+  await saveWorkflow(goal, actionHistory, { success, duration, summary });
+  await PersonalizationEngine.observe(goal, actionHistory, { success, duration, summary });
+
+  if (!options.silent) {
+    broadcast({ action: 'AGENT_COMPLETE', result: summary, steps: totalSteps });
+  }
+
+  return {
+    success,
+    summary,
+    message: summary,
+    duration,
+    steps: totalSteps,
+    results
+  };
+}
+
+async function generatePlan(goal, settings) {
+  const memory = await retrieveMemoryContext(goal);
+  const prompt = [
+    'Goal: ' + goal,
+    memory ? ('Memory:\n' + memory) : 'Memory: (none)',
+    '',
+    'Break this into 3-7 sequential subtasks.',
+    'Each subtask should be completable in under 10 browser actions.',
+    'Return JSON only in this shape:',
+    '{"steps":[{"id":"s1","task":"...","dependsOn":[],"expectedOutcome":"..."}]}'
+  ].join('\n');
+
+  try {
+    const raw = await callPlanningLLM(prompt, settings);
+    const parsed = parsePlanResponse(raw);
+    if (parsed.steps && parsed.steps.length) return parsed;
+  } catch (_) {}
+
+  return {
+    steps: [{ id: 's1', task: goal, dependsOn: [], expectedOutcome: 'Goal completed' }]
+  };
+}
+
+async function replan(goal, originalPlan, results, settings) {
+  const prompt = [
+    'Original goal: ' + goal,
+    'Original plan JSON: ' + JSON.stringify(originalPlan),
+    'Executed results JSON: ' + JSON.stringify(results.map(item => ({
+      subtask: item.subtask?.task,
+      success: item.success,
+      message: item.message
+    }))),
+    '',
+    'Generate a revised remaining plan only.',
+    'Return JSON: {"steps":[{"id","task","dependsOn","expectedOutcome"}]}'
+  ].join('\n');
+
+  try {
+    const raw = await callPlanningLLM(prompt, settings);
+    const parsed = parsePlanResponse(raw);
+    return parsed;
+  } catch (_) {
+    return { steps: [] };
+  }
+}
+
+async function callPlanningLLM(prompt, settings) {
+  return LLMGateway.callText(prompt, settings.provider, settings.model, settings, { mode: 'planning' });
+}
+
+function parsePlanResponse(raw) {
+  const parsed = extractJSON(raw);
+  if (!parsed || !Array.isArray(parsed.steps)) return { steps: [] };
+  const normalized = parsed.steps
+    .map((step, index) => ({
+      id: step.id || ('s' + (index + 1)),
+      task: String(step.task || '').trim(),
+      dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn : [],
+      expectedOutcome: String(step.expectedOutcome || '').trim() || 'Subtask completed'
+    }))
+    .filter(step => step.task);
+  return { steps: normalized.slice(0, 10) };
+}
+
+async function synthesizePlanResults(goal, results, settings) {
+  const failed = results.filter(item => !item.success);
+  if (!results.length) return 'No subtasks were executed.';
+  if (!failed.length) {
+    return 'Completed planned workflow for: ' + goal;
+  }
+
+  const prompt = [
+    'Goal: ' + goal,
+    'Summarize these subtask outcomes in 4-6 concise lines:',
+    JSON.stringify(results.map(item => ({ task: item.subtask?.task, success: item.success, message: item.message })))
+  ].join('\n');
+
+  try {
+    const summary = await callPlanningLLM(prompt, settings);
+    const parsed = parseMaybeJson(summary);
+    if (typeof parsed === 'string') return parsed;
+  } catch (_) {}
+
+  return 'Completed with ' + failed.length + ' failed subtask(s).';
+}
+
 // =============================================================================
 // MAIN AGENT LOOP
 // =============================================================================
-async function runAgentLoop(userGoal) {
+async function runAgentLoop(userGoal, options = {}) {
+  const isSubtaskRun = !!options.silentSubtask;
+  const runToken = Number(options.runToken || activeRunToken);
+  if (!isRunTokenCurrent(runToken) || agentAbort) {
+    return { success: false, steps: 0, message: 'Run cancelled.', finalUrl: '' };
+  }
+
+  const safeMode = await getSafeMode().catch(() => false);
+  let safeWindowId = null;
+  if (safeMode && !isSubtaskRun) {
+    try {
+      const safeWindow = await chrome.windows.create({
+        url: extractTargetUrl(userGoal) || 'https://www.google.com',
+        focused: true,
+        type: 'normal'
+      });
+      safeWindowId = safeWindow?.id || null;
+      broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'Safe mode enabled: running in isolated window.' });
+    } catch (_) {}
+  }
   agentActive   = true;
   agentAbort    = false;
   actionHistory = [];
+  if (!isSubtaskRun) {
+    sessionMemory = [];
+    tabOrchestrationState = { nodes: {}, dependencies: {}, extracted: {}, lastSynthesis: '' };
+  }
   sessionGoal   = userGoal;
   let steps       = 0;
   let stuckCount  = 0;       // consecutive identical action fingerprints
   let lastFingerprint = ''; // action+value+element_id hash for loop detection
-  const MAX_STEPS = 30;
+  const MAX_STEPS = options.maxSteps || 30;
+  let finalResult = { success: false, steps: 0, message: '', finalUrl: '' };
 
   try {
     const allTabs = await chrome.tabs.query({});
@@ -68,36 +1374,49 @@ async function runAgentLoop(userGoal) {
         memoryStr += `[@${t.id}] Title: ${t.title || 'Untitled'} | URL: ${t.url}\n`;
       }
     }
-    const pastMemory = await chrome.storage.local.get(['zanysurf_session_history']);
-    if (pastMemory.zanysurf_session_history) {
-      memoryStr += '\n--- PAST SESSION MEMORIES ---\n' + pastMemory.zanysurf_session_history;
+    const memoryContext = await retrieveMemoryContext(userGoal);
+    if (memoryContext) {
+      memoryStr += '\n--- VECTOR MEMORY RECALL ---\n' + memoryContext;
     }
     globalMemoryContext = memoryStr;
   } catch(e) {}
 
-  broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'Agent starting�' });
+  broadcast({
+    action: 'AGENT_STATUS',
+    status: 'running',
+    message: isSubtaskRun
+      ? ('Working subtask: ' + (options.subtask?.task || userGoal).substring(0, 90))
+      : 'Agent starting…'
+  });
 
-  while (agentActive && !agentAbort && steps < MAX_STEPS) {
+  while (agentActive && !agentAbort && steps < MAX_STEPS && isRunTokenCurrent(runToken)) {
     steps++;
 
     try {
       // 1. Get active tab
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tabs = safeWindowId
+        ? await chrome.tabs.query({ active: true, windowId: safeWindowId })
+        : await chrome.tabs.query({ active: true, currentWindow: true });
       const tab  = tabs[0];
       if (!tab) { broadcast({ action: 'AGENT_ERROR', error: 'No active tab found.' }); break; }
 
       // 2. Wait for full load
       await waitForTabReady(tab.id);
       await sleep(300);
+      await chrome.tabs.sendMessage(tab.id, { action: 'INSTALL_NETWORK_MONITOR' }).catch(() => {});
 
       const currentUrl   = tab.url   || '';
       const currentTitle = tab.title || '';
       const isSystemPage = isChromePage(currentUrl);
+      observeTabVisit(currentUrl, currentTitle);
 
       // Early completion check: if current page already satisfies the goal, stop immediately.
       if (steps >= 2 && checkGoalSatisfied(userGoal, currentUrl, currentTitle, actionHistory, steps)) {
         const completionMsg = 'Goal accomplished. Reached ' + currentUrl + ' as required.';
-        broadcast({ action: 'AGENT_COMPLETE', result: completionMsg, steps: steps - 1 });
+        finalResult = { success: true, steps: steps - 1, message: completionMsg, finalUrl: currentUrl };
+        if (!isSubtaskRun) {
+          broadcast({ action: 'AGENT_COMPLETE', result: completionMsg, steps: steps - 1 });
+        }
         await saveTaskHistory(userGoal, steps - 1, true);
         agentActive = false;
         break;
@@ -105,21 +1424,13 @@ async function runAgentLoop(userGoal) {
 
       broadcast({ action: 'AGENT_PAGE_INFO', url: currentUrl, title: currentTitle, step: steps });
 
-      // 3. Build DOM map
-      let domMap = '';
-      if (isSystemPage) {
-        domMap = 'UNMAPPABLE';
-      } else {
-        try {
-          await chrome.scripting.executeScript({
-            target: { tabId: tab.id }, files: ['content.js']
-          }).catch(() => {});
-          await sleep(500);
-          const r = await chrome.tabs.sendMessage(tab.id, { action: 'GET_DOM' });
-          domMap = (r && r.dom) ? r.dom : 'EMPTY';
-        } catch (_) {
-          domMap = 'UNMAPPABLE';
-        }
+      // 3. Build context (DOM first, Vision fallback when sparse)
+      const pageContext = await getPageContext(tab.id, isSystemPage);
+      const domMap = pageContext.mode === 'dom'
+        ? pageContext.domMap
+        : (pageContext.mode === 'vision' ? 'VISION_MODE' : 'UNMAPPABLE');
+      if (pageContext.mode === 'vision') {
+        broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'Vision mode active (DOM sparse).' });
       }
 
       // 4. Load settings
@@ -130,15 +1441,19 @@ async function runAgentLoop(userGoal) {
       let decision;
 
       // 5. Fast path: direct navigation goals should act instantly
-      decision = getFastPathDecision(userGoal, currentUrl, steps, actionHistory);
+      decision = await getBookmarkFastPathDecision(userGoal, currentUrl, steps, actionHistory);
+      if (!decision) {
+        decision = getFastPathDecision(userGoal, currentUrl, steps, actionHistory);
+      }
 
       // 6. Ask LLM for next action when fast path does not apply
       if (!decision) {
         broadcast({ action: 'AGENT_THINKING', step: steps });
+        globalMemoryContext = await buildRuntimeMemoryContext(userGoal, currentUrl);
         try {
           decision = await getNextAction(
             userGoal, domMap, actionHistory, settings,
-            currentUrl, currentTitle, steps
+            currentUrl, currentTitle, steps, pageContext
           );
         } catch (e) {
           broadcast({ action: 'AGENT_STATUS', status: 'running', message: 'LLM error, retrying�' });
@@ -146,7 +1461,7 @@ async function runAgentLoop(userGoal) {
           try {
             decision = await getNextAction(
               userGoal, domMap, actionHistory, settings,
-              currentUrl, currentTitle, steps
+              currentUrl, currentTitle, steps, pageContext
             );
           } catch (e2) {
             broadcast({ action: 'AGENT_ERROR', error: 'LLM failed: ' + e2.message });
@@ -157,6 +1472,12 @@ async function runAgentLoop(userGoal) {
 
       // 7. Safety guards
       decision = applyGuards(decision, userGoal, currentUrl, currentTitle, steps, actionHistory, domMap);
+
+      if (!isRunTokenCurrent(runToken) || agentAbort) {
+        finalResult = { success: false, steps: steps - 1, message: 'Run cancelled.', finalUrl: currentUrl };
+        agentActive = false;
+        break;
+      }
 
       // 8. Broadcast thought
       broadcast({
@@ -173,6 +1494,24 @@ async function runAgentLoop(userGoal) {
 
       // 9. Execute action
       let execResult = { success: true, detail: '' };
+
+      const approvalGate = await executeWithRiskCheck(decision, {
+        url: currentUrl,
+        title: currentTitle,
+        tabId: tab.id,
+        step: steps
+      });
+      if (!isRunTokenCurrent(runToken) || agentAbort) {
+        finalResult = { success: false, steps: steps - 1, message: 'Run cancelled.', finalUrl: currentUrl };
+        agentActive = false;
+        break;
+      }
+      if (!approvalGate.allowed) {
+        execResult = {
+          success: false,
+          detail: approvalGate.reason || 'Blocked by safety policy.'
+        };
+      } else {
 
       switch (decision.action) {
 
@@ -198,6 +1537,12 @@ async function runAgentLoop(userGoal) {
           if (!url.startsWith('http') && url !== 'about:blank') url = 'https://' + url;
           try {
             const newTab = await chrome.tabs.create({ url, active: true });
+            tabOrchestrationState.nodes[newTab.id] = {
+              status: 'opened',
+              url,
+              title: '',
+              updatedAt: Date.now()
+            };
             await sleep(800);
             await waitForTabReady(newTab.id);
             execResult.detail = 'Opened new tab: ' + url;
@@ -205,19 +1550,188 @@ async function runAgentLoop(userGoal) {
           break;
         }
 
+        case 'open_tabs': {
+          try {
+            const urls = parseMultiUrls(decision.value);
+            if (!urls.length) throw new Error('No URLs provided for open_tabs');
+            const openedIds = [];
+            for (const url of urls.slice(0, 8)) {
+              const created = await chrome.tabs.create({ url, active: false });
+              openedIds.push(created.id);
+              tabOrchestrationState.nodes[created.id] = {
+                status: 'opened',
+                url,
+                title: '',
+                updatedAt: Date.now()
+              };
+            }
+            registerDependencies(openedIds, decision.depends_on);
+            execResult.detail = 'Opened ' + openedIds.length + ' tabs: ' + openedIds.join(', ');
+          } catch (e) {
+            execResult = { success: false, detail: e.message };
+          }
+          break;
+        }
+
+        case 'activate_tab': {
+          try {
+            const targetTabId = resolveTargetTabId(decision.value);
+            if (!targetTabId) throw new Error('Unable to resolve target tab id for activate_tab');
+            if (!dependenciesMet(targetTabId)) {
+              throw new Error('Dependencies not met for tab ' + targetTabId + '. Required: ' + (tabOrchestrationState.dependencies[targetTabId] || []).join(', '));
+            }
+            await chrome.tabs.update(targetTabId, { active: true });
+            tabOrchestrationState.nodes[targetTabId] = {
+              ...(tabOrchestrationState.nodes[targetTabId] || {}),
+              status: 'active',
+              updatedAt: Date.now()
+            };
+            execResult.detail = 'Activated tab ' + targetTabId;
+          } catch (e) {
+            execResult = { success: false, detail: e.message };
+          }
+          break;
+        }
+
+        case 'wait_tab': {
+          try {
+            const targetTabId = resolveTargetTabId(decision.value);
+            if (!targetTabId) throw new Error('No tab provided for wait_tab');
+            await waitForTabReady(targetTabId);
+            tabOrchestrationState.nodes[targetTabId] = {
+              ...(tabOrchestrationState.nodes[targetTabId] || {}),
+              status: 'ready',
+              updatedAt: Date.now()
+            };
+            execResult.detail = 'Tab ' + targetTabId + ' is ready';
+          } catch (e) {
+            execResult = { success: false, detail: e.message };
+          }
+          break;
+        }
+
         case 'click':
+        case 'click_coords':
         case 'type':
         case 'key':
         case 'hover':
-        case 'select': {
+        case 'select':
+        case 'drag_drop':
+        case 'upload_file':
+        case 'enter_iframe':
+        case 'exit_iframe':
+        case 'context_click':
+        case 'shortcut':
+        case 'execute_js':
+        case 'compose_email':
+        case 'book_slot':
+        case 'fill_form':
+        case 'inspect_form':
+        case 'extract_data': {
           try {
             const r = await chrome.tabs.sendMessage(tab.id, { action: 'EXECUTE', command: decision });
             execResult = { success: !!(r && r.success), detail: r?.result || r?.error || '' };
+            if (execResult.success && decision.action === 'extract_data') {
+              const extracted = parseMaybeJson(execResult.detail);
+              if (extracted) {
+                await upsertKnowledgeGraph(extracted).catch(() => {});
+                tabOrchestrationState.extracted[tab.id] = {
+                  tabId: tab.id,
+                  url: currentUrl,
+                  title: currentTitle,
+                  extractedAt: Date.now(),
+                  data: extracted
+                };
+                tabOrchestrationState.nodes[tab.id] = {
+                  ...(tabOrchestrationState.nodes[tab.id] || {}),
+                  status: 'extracted',
+                  url: currentUrl,
+                  title: currentTitle,
+                  updatedAt: Date.now()
+                };
+              }
+            }
           } catch (e) { execResult = { success: false, detail: e.message }; }
           // Screenshot after key/click so the LLM sees results (e.g. search loaded after Enter)
           if (execResult.success && (decision.action === 'key' || decision.action === 'click' || decision.action === 'type')) {
             await sleep(900);
             captureAndBroadcast(tab.id, steps);
+          }
+          break;
+        }
+
+        case 'bridge_extension': {
+          try {
+            const payload = parseMaybeJson(decision.value) || {};
+            const bridgeName = payload.name || payload.bridge || '1Password';
+            const result = await bridgeMessage(bridgeName, payload.message || { action: 'ping' });
+            execResult = { success: !!result.success, detail: result.success ? ('Bridge response from ' + bridgeName) : (result.message || 'Bridge failed') };
+          } catch (e) {
+            execResult = { success: false, detail: e.message };
+          }
+          break;
+        }
+
+        case 'login_saved': {
+          try {
+            const payload = parseMaybeJson(decision.value) || {};
+            const result = await loginWithSavedCredential({
+              tabId: tab.id,
+              credentialId: payload.credentialId || payload.id,
+              site: payload.site || currentUrl,
+              passphrase: payload.passphrase || null
+            });
+            execResult = { success: !!result.success, detail: result.message || 'Filled login form from secure vault.' };
+          } catch (e) {
+            execResult = { success: false, detail: e.message };
+          }
+          break;
+        }
+
+        case 'synthesize': {
+          try {
+            const synthesis = await synthesizeExtractedData(userGoal, tabOrchestrationState.extracted, settings);
+            tabOrchestrationState.lastSynthesis = synthesis;
+            broadcast({ action: 'AGENT_SYNTHESIS', step: steps, synthesis });
+            execResult.detail = 'Synthesis complete across ' + Object.keys(tabOrchestrationState.extracted).length + ' tab(s)';
+          } catch (e) {
+            execResult = { success: false, detail: e.message };
+          }
+          break;
+        }
+
+        case 'export_csv': {
+          try {
+            const csv = buildCsvFromExtraction(tabOrchestrationState.extracted);
+            if (!csv) throw new Error('No extracted data available to export');
+            await chrome.storage.local.set({ zanysurf_last_export_csv: csv });
+            try {
+              await chrome.downloads.download({
+                url: 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv),
+                filename: 'zanysurf-export-' + Date.now() + '.csv',
+                saveAs: false
+              });
+              execResult.detail = 'CSV exported to Downloads';
+            } catch (_) {
+              execResult.detail = 'CSV prepared and saved in memory key zanysurf_last_export_csv';
+            }
+          } catch (e) {
+            execResult = { success: false, detail: e.message };
+          }
+          break;
+        }
+
+        case 'copy_clipboard': {
+          try {
+            const csv = buildCsvFromExtraction(tabOrchestrationState.extracted);
+            if (!csv) throw new Error('No extracted data available to copy');
+            await chrome.storage.local.set({ zanysurf_last_export_csv: csv });
+            const copied = await attemptClipboardWrite(tab.id, csv);
+            execResult.detail = copied
+              ? 'Copied extracted CSV to clipboard'
+              : 'Clipboard write blocked. CSV saved in memory key zanysurf_last_export_csv';
+          } catch (e) {
+            execResult = { success: false, detail: e.message };
           }
           break;
         }
@@ -246,6 +1760,7 @@ async function runAgentLoop(userGoal) {
           execResult = { success: false, detail: 'Unknown action: ' + decision.action };
         }
       }
+      }
 
       // 9. Broadcast result
       broadcast({
@@ -257,7 +1772,7 @@ async function runAgentLoop(userGoal) {
 
       // 9b. Retry once if element interaction failed
       if (!execResult.success &&
-          ['click','type','hover','select'].includes(decision.action) &&
+          ['click','type','hover','select','fill_form'].includes(decision.action) &&
           decision.element_id !== null && decision.element_id !== undefined) {
         await sleep(600);
         try {
@@ -279,6 +1794,33 @@ async function runAgentLoop(userGoal) {
         element_id: decision.element_id ?? null,
         success:    execResult.success
       });
+      await appendAuditLog({
+        kind: 'action',
+        goal: userGoal.substring(0, 180),
+        step: steps,
+        tabId: tab.id,
+        url: currentUrl,
+        action: decision.action,
+        value: decision.value || '',
+        success: execResult.success,
+        result: String(execResult.detail || '').substring(0, 400)
+      });
+      sessionMemory.push({
+        ts: Date.now(),
+        step: steps,
+        goal: userGoal,
+        url: currentUrl,
+        action: decision.action,
+        value: decision.value || '',
+        thought: decision.thought || '',
+        success: execResult.success,
+        vector: vectorizeText([userGoal, currentTitle, decision.action, decision.value || '', decision.thought || ''].join(' '))
+      });
+
+      const net = await chrome.tabs.sendMessage(tab.id, { action: 'READ_NETWORK_CACHE' }).catch(() => null);
+      if (net?.success && Array.isArray(net.entries) && net.entries.length) {
+        await chrome.storage.local.set({ [STORAGE_KEYS.NETWORK_CACHE]: net.entries.slice(-120) }).catch(() => {});
+      }
 
       // 10b. Stuck / infinite-loop detection
       // If the agent keeps taking the exact same action + value + element_id, it is stuck.
@@ -312,7 +1854,10 @@ async function runAgentLoop(userGoal) {
         const realUrl   = freshTabs[0]?.url || decision.value || '';
         if (checkGoalSatisfied(userGoal, realUrl, freshTabs[0]?.title || currentTitle, actionHistory, steps)) {
           const completionMsg = 'Goal accomplished. Reached ' + realUrl + ' as required.';
-          broadcast({ action: 'AGENT_COMPLETE', result: completionMsg, steps });
+          finalResult = { success: true, steps, message: completionMsg, finalUrl: realUrl };
+          if (!isSubtaskRun) {
+            broadcast({ action: 'AGENT_COMPLETE', result: completionMsg, steps });
+          }
           await saveTaskHistory(userGoal, steps, true);
           agentActive = false;
           break;
@@ -321,8 +1866,12 @@ async function runAgentLoop(userGoal) {
 
       // 11. Check completion
       if (decision.action === 'done') {
-        broadcast({ action: 'AGENT_COMPLETE', result: decision.thought, steps });
+        finalResult = { success: true, steps, message: decision.thought, finalUrl: currentUrl };
+        if (!isSubtaskRun) {
+          broadcast({ action: 'AGENT_COMPLETE', result: decision.thought, steps });
+        }
         await saveTaskHistory(userGoal, steps, true);
+        agentActive = false;
         break;
       }
 
@@ -330,17 +1879,33 @@ async function runAgentLoop(userGoal) {
 
     } catch (err) {
       console.error('[ZANYSURF] Loop error:', err);
-      broadcast({ action: 'AGENT_ERROR', error: err.message });
+      if (!isSubtaskRun) {
+        broadcast({ action: 'AGENT_ERROR', error: err.message });
+      }
       await saveTaskHistory(userGoal, steps, false);
+      finalResult = { success: false, steps, message: err.message, finalUrl: '' };
       break;
     }
   }
 
   if (steps >= MAX_STEPS && !agentAbort && agentActive) {
-    broadcast({ action: 'AGENT_ERROR', error: 'Max steps (30) reached without completing goal.' });
+    const maxStepError = 'Max steps (' + MAX_STEPS + ') reached without completing goal.';
+    if (!isSubtaskRun) {
+      broadcast({ action: 'AGENT_ERROR', error: maxStepError });
+    }
     await saveTaskHistory(userGoal, steps, false);
+    finalResult = { success: false, steps, message: maxStepError, finalUrl: '' };
   }
   agentActive = false;
+  if (!finalResult.message) {
+    finalResult = {
+      success: !agentAbort,
+      steps,
+      message: agentAbort ? 'Aborted by user.' : 'Run finished.',
+      finalUrl: ''
+    };
+  }
+  return finalResult;
 }
 
 // =============================================================================
@@ -438,7 +2003,7 @@ function applyGuards(decision, goal, url, title, step, history, domMap) {
   const unmappable = domMap === 'UNMAPPABLE' || domMap === 'EMPTY';
 
   // Cannot interact with chrome:// pages
-  if ((decision.action === 'click' || decision.action === 'type' || decision.action === 'hover') && unmappable) {
+  if (['click','type','hover','select','fill_form','inspect_form','extract_data','drag_drop','upload_file','enter_iframe','context_click','shortcut','execute_js','compose_email','book_slot','login_saved'].includes(decision.action) && unmappable) {
     const targetUrl = extractTargetUrl(goal);
     return {
       thought: 'Page is unmappable. I must navigate to a website first.',
@@ -552,7 +2117,7 @@ function applyGuards(decision, goal, url, title, step, history, domMap) {
 // =============================================================================
 // LLM PROMPT
 // =============================================================================
-async function getNextAction(goal, domMap, history, settings, currentUrl, pageTitle, stepNum) {
+async function getNextAction(goal, domMap, history, settings, currentUrl, pageTitle, stepNum, pageContext = null) {
   const MAX_DOM  = 3200;
   const unmappable = domMap === 'UNMAPPABLE' || domMap === 'EMPTY';
   const trimmedDom = !unmappable && domMap.length > MAX_DOM
@@ -570,6 +2135,15 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
   const domSection = unmappable
     ? '? PAGE STATUS: Not accessible (new tab / browser page).\n? You MUST use "navigate" immediately. Do NOT use click or type.'
     : 'INTERACTIVE ELEMENTS (use element_id numbers from this list only):\n' + trimmedDom;
+  const orchestrationSection = buildOrchestrationContext();
+  const visionSection = pageContext && pageContext.mode === 'vision'
+    ? [
+      'VISION MODE ACTIVE: DOM is sparse/unreliable on this page.',
+      'You are given a screenshot of the page.',
+      'Prefer coordinate actions when element ids are not available.',
+      'Use action "click_coords" with numeric x and y in viewport pixels.'
+    ].join('\n')
+    : '';
 
   // Site-specific hints � greatly improve accuracy on popular sites
   const siteHints = getSiteHints(currentUrl);
@@ -584,6 +2158,8 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
     'TITLE: ' + pageTitle + '\n' +
     'STEP:  ' + stepNum + ' of 30\n\n' +
     domSection + '\n\n' +
+    (visionSection ? '??? VISION CONTEXT ???\n' + visionSection + '\n\n' : '') +
+    (orchestrationSection ? '??? MULTI-TAB ORCHESTRATION ???\n' + orchestrationSection + '\n\n' : '') +
     (siteHints ? '??? SITE HINTS ???\n' + siteHints + '\n\n' : '') +
     '??? STEP HISTORY ???\n' +
     hist + '\n\n' +
@@ -594,11 +2170,21 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
     '??? AVAILABLE ACTIONS ???\n' +
     '� navigate  � Load URL. value="https://..."\n' +
     '� click     � Click element. element_id=NUMBER\n' +
+    '� click_coords � Click by coordinates from vision. x=NUMBER, y=NUMBER\n' +
     '� type      � Type text. element_id=NUMBER, value="text"\n' +
     '� key       � Press key. element_id=NUMBER or null, value="Enter"|"Tab"|"Escape"|"ArrowDown"\n' +
     '� scroll    � Scroll. value="down"|"up"|"top"\n' +
     '� hover     � Hover. element_id=NUMBER\n' +
     '� select    � Pick dropdown. element_id=NUMBER, value="option text"\n' +
+    '� open_tabs � Open multiple tabs in background. value="https://a.com|https://b.com|..."\n' +
+    '� wait_tab  � Wait for a tab to load. value="tabId"\n' +
+    '� activate_tab � Switch to tab when dependencies are met. value="tabId"\n' +
+    '� extract_data � Extract structured data from current page. value="prices|table|emails|names"\n' +
+    '� synthesize � Merge extracted data from all tabs into one result. value may be null\n' +
+    '� export_csv � Export extracted data to CSV file. value may be null\n' +
+    '� copy_clipboard � Copy extracted CSV to clipboard. value may be null\n' +
+    '� inspect_form � Inspect visible form fields and validation requirements\n' +
+    '� fill_form � Fill visible form fields intelligently. value should be JSON string/object\n' +
     '� wait      � Wait. value="2000" (ms)\n' +
     '� done      � ONLY when goal is 100% confirmed complete.\n\n' +
     '??? RULES ???\n' +
@@ -614,21 +2200,29 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
     '10. Only use element_id numbers from the list above � never invent them.\n' +
     '11. If a step failed, try a different element_id or navigate to a direct search URL.\n' +
     '12. Never repeat the same failed action+element_id.\n' +
-    '13. Scroll down to reveal more elements if the target is not visible.\n\n' +
+    '13. Scroll down to reveal more elements if the target is not visible.\n' +
+    '14. For compare/research tasks, use open_tabs -> wait_tab/activate_tab -> extract_data per tab -> synthesize -> export_csv/copy_clipboard.\n' +
+    '15. Respect tab dependency graphs: do not activate a dependent tab before required tabs are extracted.\n' +
+    '16. For forms, call inspect_form first, then fill_form, then re-check for validation errors before done.\n\n' +
+    '17. In vision mode, prefer click_coords with clear x,y values from visible UI.\n\n' +
     '??? RESPOND IN JSON ONLY � NO markdown, NO code fences, NO extra text ???\n' +
     'Example response:\n' +
     '{"thought":"I see the YouTube homepage. I will navigate directly to the search results for lo-fi music.","action":"navigate","element_id":null,"value":"https://www.youtube.com/results?search_query=lo-fi+music","is_complete":false}\n\n' +
     'Your response must be exactly one JSON object:\n' +
     '{\n' +
     '  "thought": "I see [observation]. I will [action].",\n' +
-    '  "action": "navigate|click|type|key|scroll|hover|select|wait|done",\n' +
+    '  "action": "navigate|click|click_coords|type|key|scroll|hover|select|wait|done|new_tab|open_tabs|wait_tab|activate_tab|extract_data|synthesize|export_csv|copy_clipboard|inspect_form|fill_form|drag_drop|upload_file|enter_iframe|exit_iframe|context_click|shortcut|execute_js|compose_email|book_slot|bridge_extension|login_saved",\n' +
     '  "element_id": null_or_integer,\n' +
+    '  "x": optional_number,\n' +
+    '  "y": optional_number,\n' +
     '  "value": "string or null",\n' +
+    '  "preset": "required only for execute_js; one of: ' + EXECUTE_JS_PRESETS.join('|') + '",\n' +
+    '  "args": ["optional execute_js args"],\n' +
+    '  "depends_on": [optional_tab_ids],\n' +
     '  "is_complete": true_if_done_else_false\n' +
     '}';
 
-  if (settings.provider === 'gemini') return callGemini(prompt, settings);
-  return callOllama(prompt, settings);
+  return LLMGateway.call(prompt, settings.provider, settings.model, settings, { pageContext, mode: 'agent' });
 }
 
 // =============================================================================
@@ -698,9 +2292,14 @@ async function callOllama(prompt, settings) {
     required: ['thought', 'action', 'is_complete'],
     properties: {
       thought:     { type: 'string' },
-      action:      { type: 'string', enum: ['navigate','click','type','key','scroll','hover','select','wait','done'] },
+      action:      { type: 'string', enum: ['navigate','click','click_coords','type','key','scroll','hover','select','wait','done','new_tab','open_tabs','wait_tab','activate_tab','extract_data','synthesize','export_csv','copy_clipboard','inspect_form','fill_form','drag_drop','upload_file','enter_iframe','exit_iframe','context_click','shortcut','execute_js','compose_email','book_slot','bridge_extension','login_saved'] },
       element_id:  { type: ['integer', 'null'] },
+      x:           { type: ['number', 'integer', 'null'] },
+      y:           { type: ['number', 'integer', 'null'] },
       value:       { type: ['string', 'null'] },
+      preset:      { type: ['string', 'null'], enum: [...EXECUTE_JS_PRESETS, null] },
+      args:        { type: ['array', 'null'], items: { type: ['string', 'number', 'boolean', 'null'] } },
+      depends_on:  { type: ['array', 'null'], items: { type: ['integer', 'string'] } },
       is_complete: { type: 'boolean' }
     }
   };
@@ -764,6 +2363,7 @@ async function callOllama(prompt, settings) {
     }
 
     if (rawText) {
+      await updateApiMetrics({ provider: 'ollama', promptChars: prompt.length, outputChars: rawText.length });
       if (settings.ollamaModel !== model) {
         chrome.storage.local.set({ ollamaModel: model }).catch(() => {});
       }
@@ -790,16 +2390,29 @@ async function callOllama(prompt, settings) {
 // =============================================================================
 // GEMINI
 // =============================================================================
-async function callGemini(prompt, settings) {
+async function callGemini(prompt, settings, pageContext = null) {
   const key = settings.apiKey;
   if (!key) throw new Error('Gemini API key not set. Open ? Settings.');
 
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + key;
+  const isVision = pageContext && pageContext.mode === 'vision' && pageContext.screenshot;
+  let parts = [{ text: prompt }];
+
+  if (isVision) {
+    const base64 = (pageContext.screenshot.split(',')[1] || '').trim();
+    if (base64) {
+      parts = [
+        { text: (pageContext.visionPrompt || 'Analyze this browser screenshot and identify actionable UI controls with relative positions.\n\n') + prompt },
+        { inline_data: { mime_type: 'image/jpeg', data: base64 } }
+      ];
+    }
+  }
+
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
+      contents: [{ parts }],
       generationConfig: { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 600 }
     })
   });
@@ -809,10 +2422,230 @@ async function callGemini(prompt, settings) {
   }
   const data = await res.json();
   const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  await updateApiMetrics({ provider: 'gemini', promptChars: prompt.length, outputChars: rawText.length });
   const parsed = extractJSON(rawText);
   if (!parsed) throw new Error('Could not parse JSON from Gemini: ' + rawText.substring(0, 150));
   return parsed;
 }
+
+async function detectOllamaModels(url) {
+  const baseUrl = String(url || 'http://localhost:11434').replace(/\/$/, '');
+  const res = await fetchWithTimeout(baseUrl + '/api/tags', {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' }
+  }, 6000);
+  if (!res.ok) throw new Error('Cannot connect to ' + baseUrl);
+  const data = await res.json();
+  return (data.models || []).map(model => ({
+    name: model.name,
+    size: formatBytes(Number(model.size || 0)),
+    modified: model.modified_at,
+    profile: MODEL_PROFILES[model.name] || null
+  }));
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (!value || value < 1024) return value + ' B';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = value / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return size.toFixed(1) + ' ' + units[unitIndex];
+}
+
+function trackModelPerformance(provider, model, latencyMs, success) {
+  const key = provider + ':' + model;
+  const stats = modelStats[key] || { calls: 0, totalMs: 0, failures: 0, avgMs: 0 };
+  stats.calls += 1;
+  stats.totalMs += Number(latencyMs || 0);
+  stats.avgMs = Math.round(stats.totalMs / Math.max(stats.calls, 1));
+  if (!success) stats.failures += 1;
+  modelStats[key] = stats;
+}
+
+function getProviderConfig(provider) {
+  const normalized = String(provider || 'ollama').toLowerCase();
+  const configs = {
+    ollama: { requiresKey: false, defaultModel: 'llama3', models: PROVIDER_MODELS.ollama },
+    gemini: { requiresKey: true, defaultModel: 'gemini-1.5-flash', models: PROVIDER_MODELS.gemini },
+    openai: { requiresKey: true, defaultModel: 'gpt-4o-mini', models: PROVIDER_MODELS.openai },
+    claude: { requiresKey: true, defaultModel: 'claude-haiku-4-5', models: PROVIDER_MODELS.claude },
+    groq: { requiresKey: true, defaultModel: 'llama-3.1-8b-instant', models: PROVIDER_MODELS.groq },
+    mistral: { requiresKey: true, defaultModel: 'mistral-small-latest', models: PROVIDER_MODELS.mistral }
+  };
+  return configs[normalized] || configs.ollama;
+}
+
+async function callOpenAICompatible({ url, apiKey, model, prompt, temperature = 0.1, max_tokens = 600 }) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + apiKey
+    },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature,
+      max_tokens,
+      response_format: { type: 'json_object' }
+    })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data?.error) throw new Error(data?.error?.message || ('HTTP ' + response.status));
+  return data?.choices?.[0]?.message?.content || '';
+}
+
+const LLMGateway = {
+  async call(prompt, overrideProvider, overrideModel, existingSettings = null, options = {}) {
+    const settings = existingSettings || await getSettings();
+    const provider = String(overrideProvider || settings.provider || 'ollama').toLowerCase();
+    const config = getProviderConfig(provider);
+    const model = String(overrideModel || settings.model || config.defaultModel || '').trim();
+
+    if (config.requiresKey && !settings.providerKey) {
+      throw new Error('Vault is locked or API key missing for provider: ' + provider);
+    }
+
+    const startedAt = Date.now();
+    try {
+      let parsed;
+      if (provider === 'ollama') parsed = await callOllama(prompt, { ...settings, ollamaModel: model, provider });
+      else if (provider === 'gemini') parsed = await callGemini(prompt, { ...settings, apiKey: settings.providerKey || settings.apiKey }, options.pageContext);
+      else {
+        const text = await this.callText(prompt, provider, model, settings, options);
+        parsed = extractJSON(text) || parseMaybeJson(text);
+      }
+      if (!parsed || typeof parsed !== 'object') throw new Error('Provider returned non-JSON payload');
+      trackModelPerformance(provider, model, Date.now() - startedAt, true);
+      return parsed;
+    } catch (error) {
+      trackModelPerformance(provider, model, Date.now() - startedAt, false);
+      throw error;
+    }
+  },
+
+  async callText(prompt, provider, model, existingSettings = null, options = {}) {
+    const settings = existingSettings || await getSettings();
+    const useProvider = String(provider || settings.provider || 'ollama').toLowerCase();
+    const useModel = String(model || settings.model || getProviderConfig(useProvider).defaultModel || '').trim();
+    const startedAt = Date.now();
+    try {
+      let text = '';
+      if (useProvider === 'ollama') {
+        text = await callOllamaSummary(prompt, { ...settings, ollamaModel: useModel });
+      } else if (useProvider === 'gemini') {
+        text = await callGeminiSummary(prompt, { ...settings, apiKey: settings.providerKey || settings.apiKey });
+      } else if (useProvider === 'openai') {
+        text = await callOpenAICompatible({
+          url: 'https://api.openai.com/v1/chat/completions',
+          apiKey: settings.providerKey,
+          model: useModel,
+          prompt,
+          max_tokens: options.mode === 'planning' ? 900 : 600
+        });
+      } else if (useProvider === 'groq') {
+        text = await callOpenAICompatible({
+          url: 'https://api.groq.com/openai/v1/chat/completions',
+          apiKey: settings.providerKey,
+          model: useModel,
+          prompt,
+          max_tokens: options.mode === 'planning' ? 900 : 600
+        });
+      } else if (useProvider === 'mistral') {
+        const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + settings.providerKey
+          },
+          body: JSON.stringify({
+            model: useModel,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.1,
+            max_tokens: options.mode === 'planning' ? 900 : 600,
+            response_format: { type: 'json_object' }
+          })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data?.error) throw new Error(data?.error?.message || ('Mistral HTTP ' + response.status));
+        text = data?.choices?.[0]?.message?.content || '';
+      } else if (useProvider === 'claude') {
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': settings.providerKey,
+            'anthropic-version': '2023-06-01'
+          },
+          body: JSON.stringify({
+            model: useModel,
+            max_tokens: options.mode === 'planning' ? 900 : 600,
+            messages: [{ role: 'user', content: prompt }]
+          })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data?.error) throw new Error(data?.error?.message || ('Claude HTTP ' + response.status));
+        text = data?.content?.[0]?.text || '';
+      } else {
+        throw new Error('Unknown provider: ' + useProvider);
+      }
+
+      trackModelPerformance(useProvider, useModel, Date.now() - startedAt, true);
+      return String(text || '').trim();
+    } catch (error) {
+      trackModelPerformance(useProvider, useModel, Date.now() - startedAt, false);
+      throw error;
+    }
+  },
+
+  async testConnection(provider, settings = null) {
+    const cfg = getProviderConfig(provider);
+    const resolved = settings || await getSettings();
+    try {
+      if (provider === 'ollama') {
+        const models = await detectOllamaModels(resolved.ollamaUrl || 'http://localhost:11434');
+        return { ok: true, models };
+      }
+      if (cfg.requiresKey && !resolved.providerKey) return { ok: false, error: 'Missing API key (vault locked or not configured).' };
+      if (provider === 'gemini') {
+        const probe = await callGeminiSummary('Reply with plain text: ok', { ...resolved, apiKey: resolved.providerKey });
+        return { ok: !!probe, preview: probe.substring(0, 24) };
+      }
+      if (provider === 'openai') {
+        const response = await fetch('https://api.openai.com/v1/models', { headers: { Authorization: 'Bearer ' + resolved.providerKey } });
+        return { ok: response.ok };
+      }
+      if (provider === 'groq') {
+        const response = await fetch('https://api.groq.com/openai/v1/models', { headers: { Authorization: 'Bearer ' + resolved.providerKey } });
+        return { ok: response.ok };
+      }
+      if (provider === 'mistral') {
+        const response = await fetch('https://api.mistral.ai/v1/models', { headers: { Authorization: 'Bearer ' + resolved.providerKey } });
+        return { ok: response.ok };
+      }
+      if (provider === 'claude') {
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': resolved.providerKey,
+            'anthropic-version': '2023-06-01'
+          },
+          body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] })
+        });
+        return { ok: response.ok };
+      }
+      return { ok: false, error: 'Unknown provider' };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  }
+};
 
 // =============================================================================
 // ROBUST JSON EXTRACTOR
@@ -839,6 +2672,8 @@ function extractJSON(text) {
   const actionM  = t.match(/"action"\s*:\s*"([^"]+)"/);
   const valueM   = t.match(/"value"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   const idM      = t.match(/"element_id"\s*:\s*(\d+|null)/);
+  const xM       = t.match(/"x"\s*:\s*(-?\d+(?:\.\d+)?)/);
+  const yM       = t.match(/"y"\s*:\s*(-?\d+(?:\.\d+)?)/);
 
   if (thoughtM && actionM) {
     return {
@@ -846,6 +2681,8 @@ function extractJSON(text) {
       action:      actionM[1],
       value:       valueM ? valueM[1] : null,
       element_id:  idM ? (idM[1] === 'null' ? null : parseInt(idM[1])) : null,
+      x:           xM ? Number(xM[1]) : null,
+      y:           yM ? Number(yM[1]) : null,
       is_complete: false
     };
   }
@@ -948,6 +2785,26 @@ function getFastPathDecision(goal, currentUrl, step, history) {
   }
 
   return null;
+}
+
+async function getBookmarkFastPathDecision(goal, currentUrl, step, history) {
+  if (step !== 1 || (history && history.length > 0)) return null;
+  if (!/open|go to|visit|navigate|take me/i.test(goal || '')) return null;
+
+  const bookmark = await SmartBookmarks.find(goal);
+  if (!bookmark) return null;
+
+  const host = trimHost(bookmark.url || '');
+  if (host && currentUrl.includes(host)) return null;
+
+  await SmartBookmarks.touch(bookmark.id);
+  return {
+    thought: 'I matched your request to the smart bookmark "' + bookmark.name + '" and will open it now.',
+    action: 'navigate',
+    element_id: null,
+    value: bookmark.url,
+    is_complete: false
+  };
 }
 
 // =============================================================================
@@ -1138,6 +2995,753 @@ function extractTargetUrl(goal) {
 }
 
 // =============================================================================
+// PAGE CONTEXT (DOM + VISION)
+// =============================================================================
+async function getPageContext(tabId, isSystemPage = false) {
+  const dom = await getDomContext(tabId, isSystemPage);
+  const domCount = countDomElements(dom.domMap);
+
+  if (!isSystemPage && domCount < 5) {
+    const vision = await getVisionContext(tabId);
+    if (vision) return vision;
+  }
+
+  return {
+    mode: 'dom',
+    domMap: dom.domMap,
+    domCount,
+    title: dom.title,
+    url: dom.url,
+    semantic: dom.meta?.pageType || 'generic',
+    sections: dom.meta?.sections || {},
+    primaryCTA: dom.meta?.primaryCTA || null,
+    media: dom.meta?.media || {}
+  };
+}
+
+async function getDomContext(tabId, isSystemPage = false) {
+  if (isSystemPage) {
+    return { domMap: 'UNMAPPABLE', title: '', url: '', meta: {} };
+  }
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
+    await sleep(350);
+    const response = await chrome.tabs.sendMessage(tabId, {
+      action: 'GET_DOM',
+      options: { lazyLoad: true }
+    });
+    return {
+      domMap: (response && response.dom) ? response.dom : 'EMPTY',
+      title: response?.title || '',
+      url: response?.url || '',
+      meta: response?.meta || {}
+    };
+  } catch (_) {
+    return { domMap: 'UNMAPPABLE', title: '', url: '', meta: {} };
+  }
+}
+
+async function getVisionContext(tabId) {
+  try {
+    const shots = await captureScrollableScreenshots(tabId);
+    const screenshot = shots[0] || await chrome.tabs.captureVisibleTab(null, { format: 'jpeg', quality: 70 });
+    if (!screenshot) return null;
+    return {
+      mode: 'vision',
+      screenshot,
+      stitchedScreens: shots,
+      visionPrompt: buildVisionPrompt()
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function captureScrollableScreenshots(tabId) {
+  const captures = [];
+  try {
+    const dims = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => ({
+        innerHeight: window.innerHeight,
+        totalHeight: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
+        startY: window.scrollY
+      })
+    });
+    const info = dims?.[0]?.result;
+    if (!info || !info.innerHeight || !info.totalHeight) return captures;
+    const pages = Math.min(5, Math.ceil(info.totalHeight / info.innerHeight));
+    for (let i = 0; i < pages; i++) {
+      await chrome.scripting.executeScript({ target: { tabId }, func: (y) => window.scrollTo(0, y), args: [i * info.innerHeight] }).catch(() => {});
+      await sleep(180);
+      const frame = await chrome.tabs.captureVisibleTab(null, { format: 'jpeg', quality: 62 });
+      if (frame) captures.push(frame);
+    }
+    await chrome.scripting.executeScript({ target: { tabId }, func: (y) => window.scrollTo(0, y), args: [info.startY] }).catch(() => {});
+  } catch (_) {}
+  return captures;
+}
+
+function buildVisionPrompt() {
+  return [
+    'You are in browser vision mode.',
+    'Identify the most relevant interactive UI controls from the screenshot.',
+    'Estimate click coordinates in viewport pixels.',
+    'When needed, return action click_coords with x and y.'
+  ].join(' ');
+}
+
+// =============================================================================
+// MEMORY + ORCHESTRATION HELPERS
+// =============================================================================
+function tokenizeText(text) {
+  return (text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(t => t && t.length > 2)
+    .slice(0, 120);
+}
+
+function vectorizeText(text, dims = 48) {
+  const vector = Array(dims).fill(0);
+  const tokens = tokenizeText(text);
+  for (const token of tokens) {
+    let hash = 0;
+    for (let index = 0; index < token.length; index++) {
+      hash = ((hash << 5) - hash) + token.charCodeAt(index);
+      hash |= 0;
+    }
+    const slot = Math.abs(hash) % dims;
+    vector[slot] += 1;
+  }
+  const norm = Math.sqrt(vector.reduce((sum, value) => sum + (value * value), 0)) || 1;
+  return vector.map(value => value / norm);
+}
+
+function cosineSimilarity(vecA = [], vecB = []) {
+  if (!vecA.length || !vecB.length || vecA.length !== vecB.length) return 0;
+  let score = 0;
+  for (let index = 0; index < vecA.length; index++) score += vecA[index] * vecB[index];
+  return score;
+}
+
+async function retrieveMemoryContext(goal) {
+  try {
+    const stored = await chrome.storage.local.get(['zanysurf_short_memory', 'zanysurf_long_memory']);
+    const shortMem = stored.zanysurf_short_memory || [];
+    const longMem = stored.zanysurf_long_memory || { preferences: {}, frequentSites: {}, taskPatterns: [] };
+    const queryVector = vectorizeText(goal);
+
+    const similarShort = shortMem
+      .map(item => {
+        const ageDays = Math.max(0, (Date.now() - (item.ts || Date.now())) / (1000 * 60 * 60 * 24));
+        const decay = ageDays > 30 ? Math.exp(-(ageDays - 30) / 30) : 1;
+        return { item, score: cosineSimilarity(queryVector, item.vector || []) * decay };
+      })
+      .filter(entry => entry.score > 0.18)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 3)
+      .map(entry => '- Recent step: ' + (entry.item.action || 'action') + ' on ' + trimHost(entry.item.url || '') + ' (' + Math.round(entry.score * 100) + '% similar)');
+
+    const similarPatterns = (longMem.taskPatterns || [])
+      .map(item => {
+        const ageDays = Math.max(0, (Date.now() - (item.ts || Date.now())) / (1000 * 60 * 60 * 24));
+        const decay = ageDays > 30 ? Math.exp(-(ageDays - 30) / 45) : 1;
+        return { item, score: cosineSimilarity(queryVector, item.vector || []) * decay };
+      })
+      .filter(entry => entry.score > 0.2)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 3)
+      .map(entry => '- Pattern: ' + entry.item.summary + ' (' + Math.round(entry.score * 100) + '% match)');
+
+    const topSites = Object.entries(longMem.frequentSites || {})
+      .sort((a, b) => (b[1].count || 0) - (a[1].count || 0))
+      .slice(0, 5)
+      .map(([site, data]) => '- Frequent site: ' + site + ' (' + data.count + ' visits)');
+
+    const prefLines = Object.entries(longMem.preferences || {})
+      .slice(0, 6)
+      .map(([key, value]) => '- Preference: ' + key + ' = ' + value);
+
+    return [...similarShort, ...similarPatterns, ...topSites, ...prefLines].join('\n');
+  } catch (_) {
+    return '';
+  }
+}
+
+async function buildRuntimeMemoryContext(goal, currentUrl) {
+  const recalled = await retrieveMemoryContext(goal + ' ' + currentUrl);
+  const orchestration = buildOrchestrationContext();
+  return [recalled, orchestration ? ('--- TAB GRAPH ---\n' + orchestration) : ''].filter(Boolean).join('\n\n');
+}
+
+function observeTabVisit(url, title) {
+  if (!url || isChromePage(url)) return;
+  const domain = trimHost(url);
+  if (!domain) return;
+  chrome.storage.local.get(['zanysurf_long_memory']).then((stored) => {
+    const longMem = stored.zanysurf_long_memory || { preferences: {}, frequentSites: {}, taskPatterns: [] };
+    const current = longMem.frequentSites[domain] || { count: 0, lastTitle: '', lastVisited: 0 };
+    longMem.frequentSites[domain] = {
+      count: current.count + 1,
+      lastTitle: (title || '').substring(0, 80),
+      lastVisited: Date.now()
+    };
+    chrome.storage.local.set({ zanysurf_long_memory: longMem }).catch(() => {});
+  }).catch(() => {});
+}
+
+function learnPreferencesFromGoalAndHistory(goal, history, longMem) {
+  const gl = (goal || '').toLowerCase();
+  if (gl.includes('amazon') && /price|lowest|cheapest|sort/i.test(gl)) {
+    longMem.preferences['amazon.defaultSort'] = 'price-ascending';
+  }
+  if (gl.includes('github') && /stars|popular/i.test(gl)) {
+    longMem.preferences['github.defaultSort'] = 'stars';
+  }
+  const usedSites = history
+    .map(item => trimHost(item.url || item.value || ''))
+    .filter(Boolean);
+  if (usedSites.length) {
+    longMem.preferences['recent.siteAffinity'] = usedSites.slice(-3).join(',');
+  }
+}
+
+function registerDependencies(tabIds, dependsOn) {
+  if (!Array.isArray(tabIds) || !tabIds.length) return;
+  if (!dependsOn || !Array.isArray(dependsOn) || !dependsOn.length) {
+    for (const tabId of tabIds) {
+      if (!tabOrchestrationState.dependencies[tabId]) tabOrchestrationState.dependencies[tabId] = [];
+    }
+    return;
+  }
+  const normalizedDeps = dependsOn.map(dep => resolveTargetTabId(dep)).filter(Boolean);
+  for (const tabId of tabIds) {
+    tabOrchestrationState.dependencies[tabId] = normalizedDeps;
+  }
+}
+
+function dependenciesMet(tabId) {
+  const required = tabOrchestrationState.dependencies[tabId] || [];
+  if (!required.length) return true;
+  return required.every(depId => {
+    const node = tabOrchestrationState.nodes[depId];
+    return node && ['extracted', 'done', 'ready', 'active'].includes(node.status);
+  });
+}
+
+function resolveTargetTabId(raw) {
+  if (raw === null || raw === undefined || raw === '') return null;
+  const numeric = Number(raw);
+  if (!Number.isNaN(numeric) && tabOrchestrationState.nodes[numeric]) return numeric;
+
+  const value = String(raw).trim().toLowerCase();
+  if (value.startsWith('tab-')) {
+    const parsed = Number(value.replace('tab-', ''));
+    if (!Number.isNaN(parsed) && tabOrchestrationState.nodes[parsed]) return parsed;
+  }
+
+  const ids = Object.keys(tabOrchestrationState.nodes).map(Number);
+  if (!ids.length) return null;
+  if (!Number.isNaN(numeric) && numeric >= 1 && numeric <= ids.length) {
+    return ids[numeric - 1];
+  }
+  return null;
+}
+
+function parseMultiUrls(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map(url => normalizeUrl(url))
+      .filter(Boolean);
+  }
+  const parsed = parseMaybeJson(value);
+  if (Array.isArray(parsed)) {
+    return parsed.map(url => normalizeUrl(url)).filter(Boolean);
+  }
+  return String(value || '')
+    .split(/[\n,|]+/)
+    .map(url => normalizeUrl(url.trim()))
+    .filter(Boolean);
+}
+
+function normalizeUrl(url) {
+  if (!url) return '';
+  const value = String(url).trim();
+  if (!value) return '';
+  return value.startsWith('http') ? value : ('https://' + value.replace(/^\/+/, ''));
+}
+
+function parseMaybeJson(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch (_) {
+    return null;
+  }
+}
+
+function buildOrchestrationContext() {
+  const ids = Object.keys(tabOrchestrationState.nodes);
+  if (!ids.length) return '';
+  return ids.map((id) => {
+    const node = tabOrchestrationState.nodes[id] || {};
+    const deps = tabOrchestrationState.dependencies[id] || [];
+    const depText = deps.length ? (' depends_on=' + deps.join('|')) : '';
+    return '- tab ' + id + ': ' + (node.status || 'opened') + ' ' + (trimHost(node.url || '') || '') + depText;
+  }).join('\n');
+}
+
+async function synthesizeExtractedData(goal, extractedByTab, settings) {
+  const entries = Object.values(extractedByTab || {});
+  if (!entries.length) throw new Error('No extracted data to synthesize');
+
+  const compact = entries.map(entry => ({
+    tabId: entry.tabId,
+    url: entry.url,
+    title: entry.title,
+    prices: (entry.data?.prices || []).slice(0, 10),
+    names: (entry.data?.names || []).slice(0, 10),
+    emails: (entry.data?.emails || []).slice(0, 10),
+    rows: (entry.data?.tables || []).reduce((count, table) => count + ((table.rows || []).length), 0)
+  }));
+
+  const prompt = 'Synthesize this extracted data for the user goal: ' + goal + '\n\n' +
+    'Return concise plain text with key comparisons and best match.\n\n' +
+    JSON.stringify(compact, null, 2);
+
+  try {
+    const result = await LLMGateway.callText(prompt, settings.provider, settings.model, settings, { mode: 'summary' });
+    return result || buildFallbackSynthesis(compact);
+  } catch (_) {
+    return buildFallbackSynthesis(compact);
+  }
+}
+
+async function callOllamaSummary(prompt, settings) {
+  const baseUrl = (settings.ollamaUrl || 'http://localhost:11434').replace(/\/$/, '');
+  const model = (settings.ollamaModel || 'llama3').trim();
+  const response = await fetchWithTimeout(baseUrl + '/api/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, prompt, stream: false, options: { temperature: 0.2, num_predict: 500 } })
+  }, 18000);
+  if (!response.ok) return '';
+  const data = await response.json();
+  return (data?.response || '').trim();
+}
+
+async function callGeminiSummary(prompt, settings) {
+  const key = settings.apiKey;
+  if (!key) return '';
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + key;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { responseMimeType: 'text/plain', temperature: 0.2, maxOutputTokens: 500 }
+    })
+  });
+  if (!response.ok) return '';
+  const data = await response.json();
+  return (data?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+}
+
+function buildFallbackSynthesis(compact) {
+  const lines = ['Compared ' + compact.length + ' sources:'];
+  for (const item of compact) {
+    lines.push('- ' + (trimHost(item.url || '') || ('tab ' + item.tabId)) + ': ' +
+      (item.prices[0] || item.names[0] || ('rows=' + item.rows)));
+  }
+  return lines.join('\n');
+}
+
+function buildCsvFromExtraction(extractedByTab) {
+  const entries = Object.values(extractedByTab || {});
+  if (!entries.length) return '';
+
+  const rows = [['tabId', 'site', 'title', 'name', 'price', 'email', 'tableRow']];
+  for (const entry of entries) {
+    const site = trimHost(entry.url || '');
+    const names = entry.data?.names || [];
+    const prices = entry.data?.prices || [];
+    const emails = entry.data?.emails || [];
+    const tableRows = (entry.data?.tables || []).flatMap(table => table.rows || []);
+    const maxLen = Math.max(names.length, prices.length, emails.length, tableRows.length, 1);
+
+    for (let index = 0; index < maxLen; index++) {
+      rows.push([
+        String(entry.tabId),
+        site,
+        entry.title || '',
+        names[index] || '',
+        prices[index] || '',
+        emails[index] || '',
+        Array.isArray(tableRows[index]) ? tableRows[index].join(' | ') : (tableRows[index] || '')
+      ]);
+    }
+  }
+
+  return rows.map(columns => columns.map(csvEscape).join(',')).join('\n');
+}
+
+function csvEscape(value) {
+  const text = String(value ?? '');
+  if (/[",\n]/.test(text)) return '"' + text.replace(/"/g, '""') + '"';
+  return text;
+}
+
+async function attemptClipboardWrite(tabId, text) {
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: async (payload) => {
+        try {
+          await navigator.clipboard.writeText(payload);
+          return true;
+        } catch (_) {
+          return false;
+        }
+      },
+      args: [text]
+    });
+    return !!(result && result[0] && result[0].result);
+  } catch (_) {
+    return false;
+  }
+}
+
+function trimHost(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch (_) {
+    return '';
+  }
+}
+
+async function getMemorySummary() {
+  const stored = await chrome.storage.local.get(['zanysurf_short_memory', 'zanysurf_long_memory']);
+  const shortMem = stored.zanysurf_short_memory || [];
+  const longMem = stored.zanysurf_long_memory || { preferences: {}, frequentSites: {}, taskPatterns: [] };
+  return {
+    shortTermEntries: shortMem.length,
+    longTermPreferences: Object.keys(longMem.preferences || {}).length,
+    frequentSites: Object.keys(longMem.frequentSites || {}).length,
+    learnedPatterns: (longMem.taskPatterns || []).length
+  };
+}
+
+async function exportLatestCsv() {
+  const stored = await chrome.storage.local.get(['zanysurf_last_export_csv']);
+  const csv = stored.zanysurf_last_export_csv || '';
+  if (!csv) return { success: false, error: 'No CSV data available in memory.' };
+  try {
+    await chrome.downloads.download({
+      url: 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv),
+      filename: 'zanysurf-export-' + Date.now() + '.csv',
+      saveAs: true
+    });
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// =============================================================================
+// HUMAN-IN-THE-LOOP SAFETY
+// =============================================================================
+const RISK_LEVELS = {
+  LOW: new Set(['navigate', 'scroll', 'click', 'hover', 'wait', 'open_tabs', 'wait_tab', 'activate_tab', 'shortcut', 'context_click', 'exit_iframe']),
+  MEDIUM: new Set(['type', 'select', 'key', 'extract_data', 'inspect_form', 'drag_drop', 'enter_iframe', 'compose_email', 'book_slot', 'bridge_extension', 'login_saved']),
+  HIGH: new Set(['fill_form', 'click_coords', 'copy_clipboard', 'export_csv', 'upload_file', 'execute_js']),
+  CRITICAL: new Set(['submit', 'purchase', 'delete', 'send_email', 'post'])
+};
+
+function assessRisk(action, context = {}) {
+  const actionName = String(action?.action || '').toLowerCase();
+  const thought = String(action?.thought || '').toLowerCase();
+  const value = String(action?.value || '').toLowerCase();
+
+  if (RISK_LEVELS.CRITICAL.has(actionName)) return 'CRITICAL';
+  if (RISK_LEVELS.HIGH.has(actionName)) return 'HIGH';
+  if (RISK_LEVELS.MEDIUM.has(actionName)) return 'MEDIUM';
+  if (RISK_LEVELS.LOW.has(actionName)) {
+    if (actionName === 'click' && /(buy|purchase|checkout|place order|delete|remove|send)/i.test(thought + ' ' + value)) {
+      return 'CRITICAL';
+    }
+    return 'LOW';
+  }
+  return 'MEDIUM';
+}
+
+async function executeWithRiskCheck(action, context) {
+  if (activeRunContext.silent) {
+    return { allowed: true };
+  }
+
+  const risk = assessRisk(action, context);
+
+  if (risk === 'CRITICAL') {
+    const approved = await requestHumanApproval({
+      action,
+      context,
+      message: "I'm about to " + (action.thought || action.action) + '. This may be irreversible. Proceed?'
+    });
+    if (!approved) return { allowed: false, reason: 'User declined critical action.' };
+  }
+
+  if (risk === 'HIGH') {
+    broadcast({ action: 'AGENT_WARNING', message: 'High-risk action in 3s: ' + (action.thought || action.action) });
+    await sleep(3000);
+    if (agentAbort) return { allowed: false, reason: 'Action cancelled.' };
+  }
+
+  return { allowed: true };
+}
+
+async function requestHumanApproval(payload) {
+  const requestId = crypto.randomUUID();
+  const preview = await captureScreenshotForApproval();
+  broadcast({
+    action: 'APPROVAL_REQUEST',
+    requestId,
+    payload,
+    preview,
+    ts: Date.now()
+  });
+
+  return new Promise((resolve) => {
+    pendingApprovals.set(requestId, resolve);
+    setTimeout(() => {
+      if (pendingApprovals.has(requestId)) {
+        pendingApprovals.delete(requestId);
+        resolve(false);
+      }
+    }, 45000);
+  });
+}
+
+async function captureScreenshotForApproval() {
+  try {
+    return await chrome.tabs.captureVisibleTab(null, { format: 'jpeg', quality: 55 });
+  } catch (_) {
+    return null;
+  }
+}
+
+// =============================================================================
+// WORKFLOWS (RECORD + REPLAY)
+// =============================================================================
+async function saveWorkflow(goal, steps, result) {
+  if (!result?.success) return null;
+
+  const workflow = {
+    id: crypto.randomUUID(),
+    goal,
+    steps: (steps || [])
+      .filter(step => step.success)
+      .map(step => ({
+        action: step.action,
+        value: step.value,
+        urlPattern: trimHost(step.url || ''),
+        element_id: step.element_id,
+        thought: step.thought,
+        expectedText: String(step.value || '').substring(0, 60)
+      })),
+    createdAt: Date.now(),
+    runCount: 0,
+    avgDuration: result.duration || 0,
+    tags: extractTagsLocal(goal),
+    shareCode: 'ZW-' + String(Math.floor(Math.random() * 9000) + 1000)
+  };
+
+  if (!workflow.steps.length) return null;
+
+  const stored = await chrome.storage.local.get(['zanysurf_workflows']);
+  const workflows = stored.zanysurf_workflows || [];
+  workflows.unshift(workflow);
+  await chrome.storage.local.set({ zanysurf_workflows: workflows.slice(0, 80) });
+  return workflow;
+}
+
+async function listWorkflows() {
+  const stored = await chrome.storage.local.get(['zanysurf_workflows']);
+  return stored.zanysurf_workflows || [];
+}
+
+async function replayWorkflow(workflowId) {
+  const workflows = await listWorkflows();
+  const workflow = workflows.find(item => item.id === workflowId);
+  if (!workflow) throw new Error('Workflow not found.');
+
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+  if (!tab) throw new Error('No active tab found.');
+
+  for (const step of workflow.steps) {
+    if (step.action === 'navigate') {
+      await chrome.tabs.update(tab.id, { url: normalizeUrl(step.value || '') });
+      await waitForTabReady(tab.id);
+      continue;
+    }
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }).catch(() => {});
+    await sleep(250);
+    await chrome.tabs.sendMessage(tab.id, {
+      action: 'EXECUTE',
+      command: {
+        action: step.action,
+        value: step.value,
+        element_id: step.element_id
+      }
+    }).catch(() => {});
+    await sleep(500);
+  }
+
+  workflow.runCount = (workflow.runCount || 0) + 1;
+  await chrome.storage.local.set({
+    zanysurf_workflows: workflows.map(item => item.id === workflow.id ? workflow : item)
+  });
+
+  return { success: true, message: 'Workflow replayed.', runCount: workflow.runCount };
+}
+
+// =============================================================================
+// SMART BOOKMARKS
+// =============================================================================
+const SmartBookmarks = {
+  storageKey: 'zanysurf_smart_bookmarks',
+
+  async save(name, url, context = '') {
+    const bookmark = {
+      id: crypto.randomUUID(),
+      name,
+      url,
+      tags: extractTagsLocal(name + ' ' + url + ' ' + context),
+      visitCount: 0,
+      lastVisited: null
+    };
+    const bookmarks = await this.list();
+    bookmarks.unshift(bookmark);
+    await chrome.storage.local.set({ [this.storageKey]: bookmarks.slice(0, 200) });
+    return bookmark;
+  },
+
+  async list() {
+    const stored = await chrome.storage.local.get([this.storageKey]);
+    return stored[this.storageKey] || [];
+  },
+
+  async find(query) {
+    const bookmarks = await this.list();
+    if (!bookmarks.length) return null;
+    const queryVec = vectorizeText(query);
+    const scored = bookmarks.map(bookmark => {
+      const text = bookmark.name + ' ' + (bookmark.tags || []).join(' ') + ' ' + bookmark.url;
+      return {
+        bookmark,
+        score: cosineSimilarity(queryVec, vectorizeText(text)) + ((bookmark.visitCount || 0) * 0.01)
+      };
+    }).sort((a, b) => b.score - a.score);
+
+    return scored[0]?.score > 0.2 ? scored[0].bookmark : null;
+  },
+
+  async touch(bookmarkId) {
+    const bookmarks = await this.list();
+    const updated = bookmarks.map(bookmark => {
+      if (bookmark.id !== bookmarkId) return bookmark;
+      return {
+        ...bookmark,
+        visitCount: (bookmark.visitCount || 0) + 1,
+        lastVisited: Date.now()
+      };
+    });
+    await chrome.storage.local.set({ [this.storageKey]: updated });
+  },
+
+  async deleteById(bookmarkId) {
+    const bookmarks = await this.list();
+    const updated = bookmarks.filter(bookmark => bookmark.id !== bookmarkId);
+    await chrome.storage.local.set({ [this.storageKey]: updated });
+  }
+};
+
+// =============================================================================
+// PERSONALIZATION ENGINE
+// =============================================================================
+const PersonalizationEngine = {
+  async observe(goal, steps, result) {
+    const pattern = {
+      goal,
+      goalEmbedding: vectorizeText(goal),
+      timeOfDay: new Date().getHours(),
+      dayOfWeek: new Date().getDay(),
+      sites: [...new Set((steps || []).map(step => trimHost(step.url || '')).filter(Boolean))],
+      duration: result.duration || 0,
+      success: !!result.success,
+      ts: Date.now()
+    };
+
+    const stored = await chrome.storage.local.get(['zanysurf_patterns']);
+    const patterns = stored.zanysurf_patterns || [];
+    patterns.unshift(pattern);
+    await chrome.storage.local.set({ zanysurf_patterns: patterns.slice(0, 200) });
+    await this.detectRepetition(patterns.slice(0, 40));
+  },
+
+  async detectRepetition(recentPatterns) {
+    const clusters = clusterBySimilarity(recentPatterns || []);
+    for (const cluster of clusters) {
+      if (cluster.count >= 3) {
+        await this.suggestAutomation(cluster);
+      }
+    }
+  },
+
+  async suggestAutomation(cluster) {
+    const suggestion = {
+      suggestion: 'You repeat this task often. Schedule it daily?',
+      schedule: 'daily@9am',
+      goal: cluster.sampleGoal
+    };
+    broadcast({ action: 'SUGGEST_AUTOMATION', ...suggestion });
+  }
+};
+
+function clusterBySimilarity(patterns) {
+  const clusters = [];
+  for (const pattern of patterns) {
+    let assigned = false;
+    for (const cluster of clusters) {
+      const score = cosineSimilarity(pattern.goalEmbedding || [], cluster.embedding || []);
+      if (score > 0.72) {
+        cluster.count++;
+        cluster.goals.push(pattern.goal);
+        assigned = true;
+        break;
+      }
+    }
+    if (!assigned) {
+      clusters.push({
+        count: 1,
+        embedding: pattern.goalEmbedding,
+        goals: [pattern.goal],
+        sampleGoal: pattern.goal,
+        avgTime: pattern.timeOfDay + ':00'
+      });
+    }
+  }
+  return clusters;
+}
+
+function extractTagsLocal(text) {
+  return [...new Set(tokenizeText(text))].slice(0, 12);
+}
+
+// =============================================================================
 // UTILITIES
 // =============================================================================
 function isChromePage(url) {
@@ -1153,7 +3757,10 @@ function countDomElements(domMap) {
 }
 
 function broadcast(msg) {
-  chrome.runtime.sendMessage({ ...msg, _ts: Date.now() }).catch(() => {});
+  const payload = { ...msg, _ts: Date.now() };
+  recentEvents.push(payload);
+  if (recentEvents.length > 500) recentEvents.shift();
+  chrome.runtime.sendMessage(payload).catch(() => {});
 }
 
 async function captureAndBroadcast(tabId, step) {
@@ -1165,7 +3772,7 @@ async function captureAndBroadcast(tabId, step) {
 
 async function saveTaskHistory(goal, steps, success) {
   try {
-    const stored = await chrome.storage.local.get(['taskHistory']);
+    const stored = await chrome.storage.local.get(['taskHistory', 'zanysurf_short_memory', 'zanysurf_long_memory']);
     const history = stored.taskHistory || [];
     history.unshift({
       goal: goal.substring(0, 120),
@@ -1173,9 +3780,686 @@ async function saveTaskHistory(goal, steps, success) {
       success,
       ts: Date.now()
     });
-    // Keep last 50 tasks
-    await chrome.storage.local.set({ taskHistory: history.slice(0, 50) });
+
+    const shortMemoryStored = stored.zanysurf_short_memory || [];
+    const mergedShort = [...sessionMemory, ...shortMemoryStored].slice(0, 180);
+
+    const longMemory = stored.zanysurf_long_memory || { preferences: {}, frequentSites: {}, taskPatterns: [] };
+    learnPreferencesFromGoalAndHistory(goal, actionHistory, longMemory);
+    const summary = success
+      ? 'Completed: ' + goal.substring(0, 90) + ' in ' + steps + ' steps'
+      : 'Attempted: ' + goal.substring(0, 90) + ' (' + steps + ' steps, not completed)';
+    longMemory.taskPatterns = longMemory.taskPatterns || [];
+    longMemory.taskPatterns.unshift({
+      summary,
+      success,
+      steps,
+      ts: Date.now(),
+      vector: vectorizeText(summary + ' ' + goal)
+    });
+    longMemory.taskPatterns = longMemory.taskPatterns.slice(0, 80);
+
+    await chrome.storage.local.set({
+      taskHistory: history.slice(0, 50),
+      zanysurf_short_memory: mergedShort,
+      zanysurf_long_memory: longMemory
+    });
   } catch (_) {}
+}
+
+async function appendAuditLog(entry) {
+  try {
+    const stored = await chrome.storage.local.get([STORAGE_KEYS.AUDIT]);
+    const log = stored[STORAGE_KEYS.AUDIT] || [];
+    const record = {
+      id: crypto.randomUUID(),
+      ts: Date.now(),
+      runId: currentAgentRunId,
+      ...entry
+    };
+    log.push(record);
+    await chrome.storage.local.set({ [STORAGE_KEYS.AUDIT]: log.slice(-5000) });
+  } catch (_) {}
+}
+
+async function exportAuditLog() {
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.AUDIT]);
+  const log = stored[STORAGE_KEYS.AUDIT] || [];
+  const blob = new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  await chrome.downloads.download({
+    url,
+    filename: 'zanysurf/audit-log-' + Date.now() + '.json',
+    saveAs: true
+  });
+  return { success: true, count: log.length };
+}
+
+async function buildAgentDashboardSummary() {
+  const stored = await chrome.storage.local.get([
+    STORAGE_KEYS.AUDIT,
+    STORAGE_KEYS.QUICK_RUNS,
+    STORAGE_KEYS.API_METRICS,
+    STORAGE_KEYS.SAFE_MODE,
+    'zanysurf_short_memory',
+    'zanysurf_workflows',
+    'zanysurf_smart_bookmarks'
+  ]);
+  const audit = stored[STORAGE_KEYS.AUDIT] || [];
+  const successCount = audit.filter(item => item.kind === 'action' && item.success).length;
+  const totalActions = audit.filter(item => item.kind === 'action').length;
+  const successRate = totalActions ? Math.round((successCount / totalActions) * 100) : 100;
+
+  const tasks = await SchedulerEngine.listTasks().catch(() => []);
+  return {
+    active: agentActive,
+    runId: currentAgentRunId,
+    now: Date.now(),
+    todayScheduled: tasks.filter(task => task.enabled).slice(0, 8),
+    memoryStats: {
+      memories: (stored.zanysurf_short_memory || []).length,
+      workflows: (stored.zanysurf_workflows || []).length,
+      bookmarks: (stored.zanysurf_smart_bookmarks || []).length
+    },
+    quickRuns: (stored[STORAGE_KEYS.QUICK_RUNS] || []).slice(0, 5),
+    health: {
+      successRate,
+      llmCalls: (stored[STORAGE_KEYS.API_METRICS]?.calls || 0),
+      estimatedCostUsd: Number((stored[STORAGE_KEYS.API_METRICS]?.estimatedCostUsd || 0).toFixed(4)),
+      safeMode: !!stored[STORAGE_KEYS.SAFE_MODE]
+    }
+  };
+}
+
+async function saveQuickRunGoal(goal) {
+  const value = String(goal || '').trim();
+  if (!value) return [];
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.QUICK_RUNS]);
+  const items = stored[STORAGE_KEYS.QUICK_RUNS] || [];
+  const filtered = items.filter(item => item.goal !== value);
+  filtered.unshift({ goal: value, ts: Date.now() });
+  await chrome.storage.local.set({ [STORAGE_KEYS.QUICK_RUNS]: filtered.slice(0, 20) });
+  return filtered.slice(0, 20);
+}
+
+async function listQuickRuns() {
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.QUICK_RUNS]);
+  return stored[STORAGE_KEYS.QUICK_RUNS] || [];
+}
+
+async function setUserProfile(profile) {
+  const merged = {
+    name: String(profile.name || ''),
+    email: String(profile.email || ''),
+    address: String(profile.address || ''),
+    tone: String(profile.tone || 'formal'),
+    bookingPreference: String(profile.bookingPreference || 'morning')
+  };
+  await chrome.storage.local.set({ [STORAGE_KEYS.PROFILE]: merged });
+  return merged;
+}
+
+async function getUserProfile() {
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.PROFILE]);
+  return stored[STORAGE_KEYS.PROFILE] || { tone: 'formal', bookingPreference: 'morning' };
+}
+
+async function setExtensionBridges(bridges) {
+  const normalized = (Array.isArray(bridges) ? bridges : [])
+    .map(item => ({
+      name: String(item.name || '').trim(),
+      extensionId: String(item.extensionId || '').trim(),
+      enabled: item.enabled !== false
+    }))
+    .filter(item => item.name && item.extensionId)
+    .slice(0, 20);
+  await chrome.storage.local.set({ [STORAGE_KEYS.BRIDGES]: normalized });
+  return normalized;
+}
+
+async function listExtensionBridges() {
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.BRIDGES]);
+  const existing = stored[STORAGE_KEYS.BRIDGES];
+  if (Array.isArray(existing) && existing.length) return existing;
+  const defaults = [
+    { name: '1Password', extensionId: 'aeblfdkhhhdcdjpifhhbdiojplfjncoa', enabled: false },
+    { name: 'Grammarly', extensionId: 'kbfnbcaeplbcioakkpcpgfkobkghlhen', enabled: false },
+    { name: 'uBlock Origin', extensionId: 'cjpalhdlnbpafiamejdnhcphjbkeiagm', enabled: false }
+  ];
+  await chrome.storage.local.set({ [STORAGE_KEYS.BRIDGES]: defaults });
+  return defaults;
+}
+
+async function bridgeMessage(name, payload = {}) {
+  const bridges = await listExtensionBridges();
+  const target = bridges.find(item => item.enabled && item.name.toLowerCase() === String(name || '').toLowerCase());
+  if (!target) return { success: false, message: 'Bridge not enabled for ' + name };
+  try {
+    const response = await chrome.runtime.sendMessage(target.extensionId, payload);
+    return { success: true, response };
+  } catch (error) {
+    return { success: false, message: error.message };
+  }
+}
+
+async function toggleSafeMode(enabled) {
+  await chrome.storage.local.set({ [STORAGE_KEYS.SAFE_MODE]: !!enabled });
+  return !!enabled;
+}
+
+async function getSafeMode() {
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.SAFE_MODE]);
+  return !!stored[STORAGE_KEYS.SAFE_MODE];
+}
+
+async function ensureSafeExecutionWindow() {
+  const safeMode = await getSafeMode();
+  if (!safeMode) return null;
+  const windowRef = await chrome.windows.create({ url: 'about:blank', focused: false, type: 'normal' });
+  return windowRef;
+}
+
+async function persistSessionState(state) {
+  const payload = {
+    ts: Date.now(),
+    active: !!agentActive,
+    runId: currentAgentRunId,
+    lastGoal: String(state.prompt || ''),
+    completed: !!state.completed,
+    error: state.error || null,
+    lastUrl: actionHistory[actionHistory.length - 1]?.url || null,
+    extracted: tabOrchestrationState.extracted || {}
+  };
+  await chrome.storage.local.set({ [STORAGE_KEYS.LAST_SESSION]: payload });
+}
+
+async function detectGoalContinuation(goal) {
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.LAST_SESSION]);
+  const last = stored[STORAGE_KEYS.LAST_SESSION];
+  if (!last || !last.lastGoal) return { isContinuation: false };
+  const similarity = cosineSimilarity(vectorizeText(goal), vectorizeText(last.lastGoal));
+  return {
+    isContinuation: similarity > 0.42 || /continue|resume|again/i.test(goal),
+    similarity,
+    lastUrl: last.lastUrl,
+    state: last
+  };
+}
+
+function classifyAgentError(error) {
+  const message = String(error?.message || 'Unknown agent error');
+  const lowered = message.toLowerCase();
+  if (/network|fetch|failed to fetch|timeout/.test(lowered)) {
+    return { type: 'network', message: 'Network issue detected. Retrying with backoff may help.' };
+  }
+  if (/dom|element|not found|unmappable/.test(lowered)) {
+    return { type: 'dom', message: 'Page structure issue detected. Switched to vision/alternative mode.' };
+  }
+  if (/api key|llm|gemini|ollama|model/.test(lowered)) {
+    return { type: 'llm', message: 'Model provider issue detected. Check provider settings or fallback provider.' };
+  }
+  if (/permission|not allowed|denied|cannot access|chrome:\/\//.test(lowered)) {
+    return { type: 'permission', message: 'Permission issue detected. Please reload extension and verify permissions.' };
+  }
+  return { type: 'timeout', message: 'Task interrupted unexpectedly. Please retry with a narrower goal.' };
+}
+
+function extractResearchUrls(goal) {
+  const explicit = String(goal || '').match(/https?:\/\/[^\s]+/g) || [];
+  if (explicit.length) return explicit.slice(0, 4);
+  const g = encodeURIComponent(goal || 'latest updates');
+  return [
+    'https://www.google.com/search?q=' + g,
+    'https://www.bing.com/search?q=' + g,
+    'https://duckduckgo.com/?q=' + g,
+    'https://news.ycombinator.com'
+  ];
+}
+
+function scoreDomainCredibility(url) {
+  const host = trimHost(url || '');
+  if (!host) return 0.4;
+  if (/\.gov$|\.edu$|wikipedia\.org$|github\.com$|stackoverflow\.com$/.test(host)) return 0.9;
+  if (/\.org$|reuters\.com$|bbc\.com$|nytimes\.com$/.test(host)) return 0.82;
+  if (/medium\.com$|substack\.com$/.test(host)) return 0.65;
+  return 0.55;
+}
+
+function collectFactsFromResearchItem(item) {
+  const facts = [];
+  if (item.text) {
+    const chunks = item.text.split(/[.\n]/).map(value => value.trim()).filter(Boolean).slice(0, 18);
+    chunks.forEach(chunk => facts.push(chunk));
+  }
+  const names = item.extract?.names || [];
+  const prices = item.extract?.prices || [];
+  names.slice(0, 8).forEach(name => facts.push('Name: ' + name));
+  prices.slice(0, 8).forEach(price => facts.push('Price: ' + price));
+  return facts;
+}
+
+function dedupeFacts(facts) {
+  const seen = new Set();
+  const out = [];
+  for (const fact of (facts || [])) {
+    const key = String(fact || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(String(fact).substring(0, 240));
+    if (out.length >= 80) break;
+  }
+  return out;
+}
+
+function detectContradictionsFromClaims(claims = []) {
+  const contradictions = [];
+  const normalized = claims.map(item => String(item || '').toLowerCase());
+  for (let i = 0; i < normalized.length; i++) {
+    for (let j = i + 1; j < normalized.length; j++) {
+      const a = normalized[i];
+      const b = normalized[j];
+      if ((a.includes('not') && !b.includes('not')) || (!a.includes('not') && b.includes('not'))) {
+        if (tokenOverlap(a, b) > 0.45) {
+          contradictions.push({ a: claims[i], b: claims[j], reason: 'Polarity mismatch around similar statement.' });
+          if (contradictions.length >= 8) return contradictions;
+        }
+      }
+    }
+  }
+  return contradictions;
+}
+
+function tokenOverlap(a, b) {
+  const aa = new Set(tokenizeText(a));
+  const bb = new Set(tokenizeText(b));
+  const union = new Set([...aa, ...bb]);
+  let common = 0;
+  aa.forEach(token => { if (bb.has(token)) common++; });
+  return union.size ? (common / union.size) : 0;
+}
+
+function inferWriterDestination(goal) {
+  const text = String(goal || '').toLowerCase();
+  if (text.includes('notion')) return 'https://www.notion.so';
+  if (text.includes('docs') || text.includes('google doc')) return 'https://docs.google.com/document/u/0/';
+  return 'https://docs.new';
+}
+
+function buildStructuredWriteContent(analysis = {}, research = {}) {
+  const lines = [];
+  lines.push('# Agent Report');
+  lines.push('');
+  lines.push('## Summary');
+  lines.push(analysis.summary || 'No summary generated.');
+  lines.push('');
+  lines.push('## Claims');
+  (analysis.claims || []).slice(0, 10).forEach((claim, index) => {
+    lines.push((index + 1) + '. ' + claim.text + ' (confidence ' + claim.confidence + ')');
+  });
+  lines.push('');
+  lines.push('## Sources');
+  (research.sources || []).slice(0, 10).forEach((source, index) => {
+    lines.push('- [' + (index + 1) + '] ' + source.url + ' (credibility ' + source.credibility + ')');
+  });
+  return lines.join('\n');
+}
+
+function splitMarkdownSections(content) {
+  const chunks = String(content || '').split(/\n##\s+/g).map((chunk, index) => ({
+    heading: index === 0 ? 'Intro' : chunk.split('\n')[0],
+    plain: chunk.replace(/^#\s+/gm, '').replace(/^##\s+/gm, '').replace(/\*\*/g, '').trim()
+  })).filter(item => item.plain);
+  return chunks.length ? chunks : [{ heading: 'Content', plain: String(content || '') }];
+}
+
+async function generateStepReplayHtml() {
+  const steps = actionHistory || [];
+  const rows = steps.map((step, index) => '<tr><td>' + (index + 1) + '</td><td>' + escHtml(step.thought || '') + '</td><td>' + escHtml(step.action || '') + '</td><td>' + escHtml(step.success ? '✓' : '✗') + '</td></tr>').join('');
+  return '<!doctype html><html><head><meta charset="utf-8"><title>ZANYSURF Replay</title><style>body{font-family:system-ui;background:#0a0a12;color:#e5e7eb;padding:20px}table{width:100%;border-collapse:collapse}td,th{border:1px solid #1f2937;padding:8px}th{background:#111827}</style></head><body><h1>Step Replay</h1><table><thead><tr><th>#</th><th>Thought</th><th>Action</th><th>Result</th></tr></thead><tbody>' + rows + '</tbody></table></body></html>';
+}
+
+function escHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+async function getKnowledgeGraph() {
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.GRAPH]);
+  return stored[STORAGE_KEYS.GRAPH] || { nodes: {}, edges: {} };
+}
+
+async function upsertKnowledgeGraph(extracted = {}) {
+  const graph = await getKnowledgeGraph();
+  const nodes = graph.nodes || {};
+  const edges = graph.edges || {};
+
+  (extracted.names || []).slice(0, 20).forEach((name) => {
+    const personId = 'person:' + name.toLowerCase();
+    nodes[personId] = { id: personId, label: name, type: 'Person' };
+    (extracted.emails || []).slice(0, 3).forEach((email) => {
+      const emailId = 'email:' + email.toLowerCase();
+      nodes[emailId] = { id: emailId, label: email, type: 'Contact' };
+      edges[personId + '->' + emailId] = { from: personId, to: emailId, relation: 'hasContact' };
+    });
+  });
+
+  (extracted.prices || []).slice(0, 20).forEach((price, index) => {
+    const productId = 'product:' + index + ':' + String(price).toLowerCase();
+    const priceId = 'price:' + String(price).toLowerCase();
+    nodes[productId] = { id: productId, label: 'Product ' + (index + 1), type: 'Product' };
+    nodes[priceId] = { id: priceId, label: price, type: 'Price' };
+    edges[productId + '->' + priceId] = { from: productId, to: priceId, relation: 'hasPrice' };
+  });
+
+  await chrome.storage.local.set({ [STORAGE_KEYS.GRAPH]: { nodes, edges } });
+}
+
+async function unlockCredentialVault(passphrase) {
+  const value = String(passphrase || '').trim();
+  if (!value || value.length < 8) {
+    throw new Error('Master passphrase must be at least 8 characters.');
+  }
+  credentialVaultSessionPassphrase = value;
+  await ensureCredentialVaultInitialized();
+  return { success: true };
+}
+
+async function ensureCredentialVaultInitialized() {
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.CREDENTIAL_VAULT]);
+  const vault = stored[STORAGE_KEYS.CREDENTIAL_VAULT];
+  if (vault && vault.version === 1 && vault.salt) {
+    if (!vault.providerKeys) {
+      const upgraded = { ...vault, providerKeys: {} };
+      await chrome.storage.local.set({ [STORAGE_KEYS.CREDENTIAL_VAULT]: upgraded });
+      return upgraded;
+    }
+    return vault;
+  }
+  const initialized = {
+    version: 1,
+    salt: toBase64(randomBytes(16)),
+    entries: [],
+    providerKeys: {}
+  };
+  await chrome.storage.local.set({ [STORAGE_KEYS.CREDENTIAL_VAULT]: initialized });
+  return initialized;
+}
+
+function lockCredentialVault() {
+  credentialVaultSessionPassphrase = null;
+}
+
+function providerToVaultField(provider) {
+  const normalized = String(provider || '').toLowerCase();
+  const map = {
+    gemini: 'geminiKey',
+    openai: 'openaiKey',
+    claude: 'claudeKey',
+    groq: 'groqKey',
+    mistral: 'mistralKey'
+  };
+  return map[normalized] || '';
+}
+
+async function loadProviderApiKeys() {
+  const vault = await ensureCredentialVaultInitialized();
+  const encryptedMap = vault.providerKeys || {};
+  if (!credentialVaultSessionPassphrase) return {};
+  const key = await deriveVaultKey(credentialVaultSessionPassphrase, fromBase64(vault.salt));
+  const result = {};
+  for (const [provider, encrypted] of Object.entries(encryptedMap)) {
+    try {
+      result[provider] = await decryptStringAesGcm(encrypted, key);
+    } catch (_) {}
+  }
+  return result;
+}
+
+async function storeProviderApiKey(provider, plainKey, passphrase) {
+  const normalized = String(provider || '').toLowerCase();
+  if (!providerToVaultField(normalized)) throw new Error('Provider does not require cloud API key.');
+  const value = String(plainKey || '').trim();
+  if (!value) throw new Error('API key is empty.');
+
+  const master = String(passphrase || credentialVaultSessionPassphrase || '').trim();
+  if (!master) throw new Error('Vault is locked. Unlock first.');
+
+  const vault = await ensureCredentialVaultInitialized();
+  const key = await deriveVaultKey(master, fromBase64(vault.salt));
+  const encrypted = await encryptStringAesGcm(value, key);
+  const providerKeys = { ...(vault.providerKeys || {}), [normalized]: encrypted };
+  await chrome.storage.local.set({ [STORAGE_KEYS.CREDENTIAL_VAULT]: { ...vault, providerKeys } });
+  credentialVaultSessionPassphrase = master;
+  await appendAuditLog({ kind: 'provider_key_save', provider: normalized });
+}
+
+async function saveCredentialEntry({ site, username, password, passphrase, notes }) {
+  const normalizedSite = normalizeCredentialSite(site);
+  if (!normalizedSite) throw new Error('Valid site/domain is required.');
+  const user = String(username || '').trim();
+  const pass = String(password || '');
+  if (!user || !pass) throw new Error('Username and password are required.');
+
+  const master = String(passphrase || credentialVaultSessionPassphrase || '').trim();
+  if (!master) throw new Error('Unlock vault first or provide passphrase.');
+
+  const vault = await ensureCredentialVaultInitialized();
+  const key = await deriveVaultKey(master, fromBase64(vault.salt));
+  const payload = JSON.stringify({ username: user, password: pass, notes: String(notes || '') });
+  const encrypted = await encryptStringAesGcm(payload, key);
+
+  const entry = {
+    id: crypto.randomUUID(),
+    site: normalizedSite,
+    usernameMask: maskUsername(user),
+    cipher: encrypted.cipher,
+    iv: encrypted.iv,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    lastUsed: null
+  };
+
+  const entries = (vault.entries || []).filter(item => !(item.site === normalizedSite && item.usernameMask === maskUsername(user)));
+  entries.unshift(entry);
+  await chrome.storage.local.set({ [STORAGE_KEYS.CREDENTIAL_VAULT]: { ...vault, entries: entries.slice(0, 120) } });
+  await appendAuditLog({ kind: 'credential_save', site: normalizedSite, usernameMask: entry.usernameMask });
+  credentialVaultSessionPassphrase = master;
+  return redactCredentialEntry(entry);
+}
+
+async function listCredentialEntries() {
+  const vault = await ensureCredentialVaultInitialized();
+  return (vault.entries || []).map(redactCredentialEntry);
+}
+
+async function deleteCredentialEntry(id) {
+  const vault = await ensureCredentialVaultInitialized();
+  const entries = (vault.entries || []).filter(item => item.id !== id);
+  await chrome.storage.local.set({ [STORAGE_KEYS.CREDENTIAL_VAULT]: { ...vault, entries } });
+  await appendAuditLog({ kind: 'credential_delete', credentialId: id });
+}
+
+async function loginWithSavedCredential({ credentialId, site, passphrase, tabId }) {
+  const vault = await ensureCredentialVaultInitialized();
+  const entry = selectCredentialEntry(vault.entries || [], credentialId, site);
+  if (!entry) throw new Error('No saved credential found for this site.');
+
+  const master = String(passphrase || credentialVaultSessionPassphrase || '').trim();
+  if (!master) throw new Error('Vault is locked. Provide passphrase to login.');
+
+  const key = await deriveVaultKey(master, fromBase64(vault.salt));
+  let decrypted;
+  try {
+    decrypted = await decryptStringAesGcm({ cipher: entry.cipher, iv: entry.iv }, key);
+  } catch (_) {
+    throw new Error('Incorrect passphrase or vault data is invalid.');
+  }
+  const creds = parseMaybeJson(decrypted) || {};
+  if (!creds.username || !creds.password) throw new Error('Saved credential is incomplete.');
+
+  const targetTabId = tabId || (await getActiveTabId());
+  if (!targetTabId) throw new Error('No active tab found for login.');
+
+  await chrome.scripting.executeScript({ target: { tabId: targetTabId }, files: ['content.js'] }).catch(() => {});
+  await chrome.tabs.sendMessage(targetTabId, {
+    action: 'EXECUTE',
+    command: {
+      action: 'fill_form',
+      value: JSON.stringify({
+        username: creds.username,
+        email: creds.username,
+        login: creds.username,
+        user: creds.username,
+        password: creds.password,
+        pass: creds.password
+      })
+    }
+  }).catch(() => {});
+
+  await chrome.tabs.sendMessage(targetTabId, {
+    action: 'EXECUTE',
+    command: {
+      action: 'key',
+      value: 'Enter'
+    }
+  }).catch(() => {});
+
+  await touchCredentialEntry(entry.id);
+  await appendAuditLog({ kind: 'credential_login', site: entry.site, credentialId: entry.id, tabId: targetTabId });
+  credentialVaultSessionPassphrase = master;
+  return { success: true, message: 'Filled login form for ' + entry.site };
+}
+
+async function touchCredentialEntry(id) {
+  const vault = await ensureCredentialVaultInitialized();
+  const entries = (vault.entries || []).map(item => item.id === id ? { ...item, lastUsed: Date.now(), updatedAt: Date.now() } : item);
+  await chrome.storage.local.set({ [STORAGE_KEYS.CREDENTIAL_VAULT]: { ...vault, entries } });
+}
+
+function normalizeCredentialSite(site) {
+  const raw = String(site || '').trim();
+  if (!raw) return '';
+  try {
+    if (/^https?:\/\//i.test(raw)) return new URL(raw).hostname.toLowerCase();
+    return new URL('https://' + raw).hostname.toLowerCase();
+  } catch (_) {
+    return raw.toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
+  }
+}
+
+function selectCredentialEntry(entries, credentialId, site) {
+  if (credentialId) return entries.find(item => item.id === credentialId) || null;
+  const normalized = normalizeCredentialSite(site);
+  if (!normalized) return null;
+  return entries.find(item => item.site === normalized) || entries.find(item => normalized.endsWith(item.site)) || null;
+}
+
+function redactCredentialEntry(entry) {
+  return {
+    id: entry.id,
+    site: entry.site,
+    usernameMask: entry.usernameMask,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+    lastUsed: entry.lastUsed
+  };
+}
+
+function maskUsername(username) {
+  const value = String(username || '').trim();
+  if (!value) return '***';
+  if (value.length <= 2) return value[0] + '*';
+  return value[0] + '*'.repeat(Math.max(1, value.length - 2)) + value[value.length - 1];
+}
+
+async function getActiveTabId() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  return tabs[0]?.id || null;
+}
+
+function randomBytes(size) {
+  const array = new Uint8Array(size);
+  crypto.getRandomValues(array);
+  return array;
+}
+
+function toBase64(uint8) {
+  let binary = '';
+  uint8.forEach(byte => { binary += String.fromCharCode(byte); });
+  return btoa(binary);
+}
+
+function fromBase64(base64) {
+  const binary = atob(base64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+async function deriveVaultKey(passphrase, saltBytes) {
+  const enc = new TextEncoder();
+  const baseKey = await crypto.subtle.importKey('raw', enc.encode(passphrase), { name: 'PBKDF2' }, false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      hash: 'SHA-256',
+      salt: saltBytes,
+      iterations: 180000
+    },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+async function encryptStringAesGcm(plainText, key) {
+  const iv = randomBytes(12);
+  const data = new TextEncoder().encode(String(plainText || ''));
+  const cipherBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data);
+  return {
+    iv: toBase64(iv),
+    cipher: toBase64(new Uint8Array(cipherBuffer))
+  };
+}
+
+async function decryptStringAesGcm(encrypted, key) {
+  const iv = fromBase64(String(encrypted.iv || ''));
+  const cipher = fromBase64(String(encrypted.cipher || ''));
+  const plainBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipher);
+  return new TextDecoder().decode(plainBuffer);
+}
+
+async function updateApiMetrics({ provider, promptChars, outputChars }) {
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.API_METRICS]);
+  const metrics = stored[STORAGE_KEYS.API_METRICS] || {
+    calls: 0,
+    callsByProvider: { gemini: 0, ollama: 0 },
+    hourly: [],
+    estimatedCostUsd: 0,
+    ollamaChars: 0
+  };
+
+  metrics.calls += 1;
+  metrics.callsByProvider[provider] = (metrics.callsByProvider[provider] || 0) + 1;
+  metrics.hourly.push(Date.now());
+  metrics.hourly = metrics.hourly.filter(ts => Date.now() - ts < (60 * 60 * 1000));
+
+  const totalChars = Number(promptChars || 0) + Number(outputChars || 0);
+  if (provider === 'gemini') {
+    metrics.estimatedCostUsd += (totalChars / 1_000_000) * 0.35;
+  }
+  if (provider === 'ollama') {
+    metrics.ollamaChars += totalChars;
+  }
+
+  await chrome.storage.local.set({ [STORAGE_KEYS.API_METRICS]: metrics });
+  if ((metrics.hourly || []).length > 100) {
+    broadcast({ action: 'AGENT_WARNING', message: 'Rate limit warning: more than 100 model calls in the last hour.' });
+  }
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
