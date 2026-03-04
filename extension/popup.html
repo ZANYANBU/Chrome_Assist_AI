@@ -150,6 +150,8 @@
         <button class="nav-item" data-view="view-vault" title="Vault">🔐</button>
         <button class="nav-item" data-view="view-analytics" title="Analytics">📊</button>
         <button class="nav-item" data-view="view-settings" title="Settings">⚙</button>
+        <button class="nav-item" data-view="view-tabs" title="Active Tabs">⊞</button>
+        <button class="nav-item" data-view="view-tasks" title="Task Engine">⚡</button>
       </nav>
 
       <div class="workspace-content">
@@ -251,6 +253,39 @@
               <div class="tile-title">About</div>
               <p class="muted">ZANYSURF v2.0.0 · Built by Anbu Chelvan Valavan</p>
             </div>
+          </section>
+
+          <!-- ===== TAB ORCHESTRATOR VIEW ===== -->
+          <section id="view-tabs" class="view">
+            <div class="section-head with-actions">
+              <h3>Active Tabs</h3>
+              <div class="inline-actions">
+                <button id="tabs-refresh-btn" class="btn-secondary">Refresh</button>
+                <button id="tabs-close-all-btn" class="btn-secondary">Close All</button>
+              </div>
+            </div>
+            <div id="tab-registry-list" class="list"></div>
+          </section>
+
+          <!-- ===== TASK ENGINE VIEW ===== -->
+          <section id="view-tasks" class="view">
+            <div class="section-head with-actions">
+              <h3>Task Engine</h3>
+              <div class="inline-actions">
+                <button id="tasks-refresh-btn" class="btn-secondary">Refresh</button>
+                <button id="tasks-cancel-all-btn" class="btn-secondary">Cancel All</button>
+              </div>
+            </div>
+            <div class="card" style="margin-bottom:8px">
+              <div class="tile-title">Concurrency</div>
+              <div class="inline-actions" style="align-items:center;gap:8px">
+                <label for="max-concurrent-input" style="font-size:12px">Max concurrent:</label>
+                <input id="max-concurrent-input" type="number" min="1" max="5" value="3" class="input" style="width:48px;text-align:center">
+                <button id="set-concurrent-btn" class="btn-secondary">Set</button>
+              </div>
+            </div>
+            <div id="task-engine-progress" class="task-engine-bar-wrap"></div>
+            <div id="task-engine-list" class="list"></div>
           </section>
         </main>
 

@@ -37,6 +37,686 @@ const recentEvents = [];
 const modelStats = {};
 let activeRunToken = 0;
 
+// =============================================================================
+// UPGRADE 1 — TAB ORCHESTRATOR v2
+// Full tab lifecycle, dependency graph, health monitoring, cross-tab memory
+// =============================================================================
+class TabOrchestrator {
+  constructor() {
+    this.registry    = new Map();   // tabId → TabState
+    this.dependencies = new Map();  // tabId → [dependsOnTabId]
+    this.results     = new Map();   // tabId → extracted result
+    this.orchestrationToken = null;
+  }
+
+  // ── Tab Lifecycle ──────────────────────────────────────────────────────────
+
+  async openTab(url, options = {}) {
+    try {
+      const tab = await chrome.tabs.create({ url, active: false });
+      await this.waitForTabReady(tab.id);
+      const state = {
+        tabId: tab.id,
+        url,
+        label: options.label || url,
+        goal: options.goal || null,
+        status: 'ready',
+        openedAt: Date.now(),
+        completedAt: null,
+        runToken: options.runToken || null,
+        result: null,
+        errorMessage: null,
+        stepCount: 0
+      };
+      this.registry.set(tab.id, state);
+      if (Array.isArray(options.dependsOn) && options.dependsOn.length) {
+        this.dependencies.set(tab.id, options.dependsOn);
+      }
+      this.broadcastRegistryUpdate();
+      return this.registry.get(tab.id);
+    } catch (err) {
+      return { tabId: null, error: err.message };
+    }
+  }
+
+  async waitForTabReady(tabId, timeoutMs = 15000) {
+    return new Promise((resolve, reject) => {
+      const deadline = setTimeout(() => {
+        chrome.tabs.onUpdated.removeListener(listener);
+        reject(new Error('Tab load timeout after ' + timeoutMs + 'ms'));
+      }, timeoutMs);
+      chrome.tabs.get(tabId, tab => {
+        if (chrome.runtime.lastError) {
+          clearTimeout(deadline);
+          return reject(new Error('Tab closed before ready'));
+        }
+        if (tab && tab.status === 'complete') {
+          clearTimeout(deadline);
+          return resolve();
+        }
+        const listener = (id, info) => {
+          if (id === tabId && info.status === 'complete') {
+            clearTimeout(deadline);
+            chrome.tabs.onUpdated.removeListener(listener);
+            resolve();
+          }
+        };
+        chrome.tabs.onUpdated.addListener(listener);
+      });
+    });
+  }
+
+  updateTabState(tabId, patch) {
+    const existing = this.registry.get(tabId);
+    if (!existing) return;
+    this.registry.set(tabId, { ...existing, ...patch });
+    this.broadcastRegistryUpdate();
+  }
+
+  async closeTab(tabId) {
+    try { await chrome.tabs.remove(tabId); } catch (_) {}
+    this.registry.delete(tabId);
+    this.dependencies.delete(tabId);
+    this.broadcastRegistryUpdate();
+  }
+
+  async closeAllOrchestratedTabs() {
+    const ids = [...this.registry.keys()];
+    await Promise.allSettled(ids.map(id => this.closeTab(id)));
+  }
+
+  // ── Dependency Resolution ──────────────────────────────────────────────────
+
+  getReadyTabs() {
+    return [...this.registry.entries()]
+      .filter(([tabId, state]) => {
+        if (state.status !== 'ready') return false;
+        const deps = this.dependencies.get(tabId) || [];
+        return deps.every(depId => this.registry.get(depId)?.status === 'done');
+      })
+      .map(([, state]) => state);
+  }
+
+  areDependenciesMet(tabId) {
+    const deps = this.dependencies.get(tabId) || [];
+    return deps.every(depId => this.registry.get(depId)?.status === 'done');
+  }
+
+  getDependencyResults(tabId) {
+    const deps = this.dependencies.get(tabId) || [];
+    return deps.map(depId => ({
+      tabId: depId,
+      label: this.registry.get(depId)?.label,
+      result: this.results.get(depId)
+    })).filter(d => d.result != null);
+  }
+
+  // ── Result Management ──────────────────────────────────────────────────────
+
+  storeResult(tabId, result) {
+    this.results.set(tabId, result);
+    this.updateTabState(tabId, { status: 'done', completedAt: Date.now(), result });
+  }
+
+  storeError(tabId, errorMessage) {
+    this.updateTabState(tabId, { status: 'error', completedAt: Date.now(), errorMessage });
+  }
+
+  getAllResults() {
+    return Object.fromEntries(this.results);
+  }
+
+  // ── Health Monitoring ──────────────────────────────────────────────────────
+
+  async auditTabHealth() {
+    for (const [tabId, state] of this.registry) {
+      if (state.status === 'done' || state.status === 'error') continue;
+      try {
+        await chrome.tabs.get(tabId);
+      } catch (_) {
+        this.updateTabState(tabId, { status: 'closed', errorMessage: 'Tab was closed externally' });
+      }
+    }
+  }
+
+  // ── Broadcast ─────────────────────────────────────────────────────────────
+
+  broadcastRegistryUpdate() {
+    const snapshot = {};
+    for (const [id, s] of this.registry) {
+      snapshot[id] = {
+        tabId: s.tabId, label: s.label, url: s.url, status: s.status,
+        goal: s.goal, stepCount: s.stepCount,
+        openedAt: s.openedAt, completedAt: s.completedAt,
+        errorMessage: s.errorMessage
+      };
+    }
+    broadcast({ action: 'ORCHESTRATOR_UPDATE', registry: snapshot });
+  }
+
+  getSnapshot() {
+    const snapshot = {};
+    for (const [id, s] of this.registry) snapshot[id] = { ...s };
+    return { registry: snapshot, dependencies: Object.fromEntries(this.dependencies) };
+  }
+
+  // ── Persistence ────────────────────────────────────────────────────────────
+
+  async persist() {
+    const serializable = {};
+    for (const [id, state] of this.registry) serializable[id] = state;
+    await chrome.storage.local.set({ zanysurf_tab_registry: serializable });
+  }
+
+  async restore() {
+    try {
+      const data = await chrome.storage.local.get('zanysurf_tab_registry');
+      if (data.zanysurf_tab_registry) {
+        for (const [id, state] of Object.entries(data.zanysurf_tab_registry)) {
+          this.registry.set(Number(id), state);
+        }
+        await this.auditTabHealth();
+      }
+    } catch (_) {}
+  }
+}
+
+const tabOrchestrator = new TabOrchestrator();
+
+// =============================================================================
+// UPGRADE 2 — MEMORY SYSTEM v2 WITH DECAY
+// 64-dim embeddings, short/long-term isolation, promotion, exponential decay
+// =============================================================================
+class MemorySystem {
+  constructor() {
+    this.shortTerm = [];
+    this.longTerm  = [];
+    this.config = {
+      shortTermLimit: 20,
+      longTermLimit: 500,
+      promotionThreshold: 3,
+      decayHalfLifeDays: 14,
+      similarityThreshold: 0.72,
+      topK: 5
+    };
+  }
+
+  // ── Embedding ──────────────────────────────────────────────────────────────
+
+  embed(text) {
+    const normalized = String(text || '').toLowerCase()
+      .replace(/[^a-z0-9\s]/g, '').trim();
+    const words = normalized.split(/\s+/).filter(Boolean);
+    const vec = new Float32Array(64).fill(0);
+
+    // Character bigram features → dimensions 0-31
+    for (let i = 0; i < normalized.length - 1; i++) {
+      const bigram = normalized.charCodeAt(i) * 31 + normalized.charCodeAt(i + 1);
+      vec[bigram % 32] += 1;
+    }
+    // Word hash features → dimensions 32-63
+    for (const word of words) {
+      let h = 5381;
+      for (let j = 0; j < word.length; j++) {
+        h = ((h << 5) + h) + word.charCodeAt(j);
+        h = h & h;
+      }
+      vec[32 + (Math.abs(h) % 32)] += 1;
+    }
+    // L2 normalize
+    const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
+    return vec.map(v => v / norm);
+  }
+
+  cosineSimilarity(a, b) {
+    if (!a || !b || a.length !== b.length) return 0;
+    let dot = 0;
+    for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+    return Math.max(-1, Math.min(1, dot));
+  }
+
+  // ── Decay ──────────────────────────────────────────────────────────────────
+
+  computeDecayWeight(memory) {
+    const ageDays = Math.max(0, (Date.now() - (memory.timestamp || Date.now())) / 86_400_000);
+    const decayWeight = Math.pow(2, -ageDays / this.config.decayHalfLifeDays);
+    const accessBoost = Math.min(2.0, 1 + (memory.accessCount || 0) * 0.1);
+    return decayWeight * accessBoost;
+  }
+
+  // ── Short-Term ─────────────────────────────────────────────────────────────
+
+  addShortTerm(entry) {
+    const memory = {
+      id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + Math.random().toString(36)),
+      ...entry,
+      embedding: Array.from(this.embed(entry.goal || '')),
+      accessCount: 0,
+      promoted: false,
+      source: 'short_term',
+      timestamp: entry.timestamp || Date.now()
+    };
+    this.shortTerm.unshift(memory);
+    if (this.shortTerm.length > this.config.shortTermLimit) {
+      this.shortTerm = this.shortTerm.slice(0, this.config.shortTermLimit);
+    }
+    return memory;
+  }
+
+  getShortTerm() { return [...this.shortTerm]; }
+  clearShortTerm() { this.shortTerm = []; }
+
+  // ── Long-Term ──────────────────────────────────────────────────────────────
+
+  async addLongTerm(entry) {
+    const memory = {
+      id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + Math.random().toString(36)),
+      ...entry,
+      embedding: Array.from(this.embed(entry.goal || '')),
+      accessCount: 0,
+      source: entry.source || 'long_term',
+      timestamp: entry.timestamp || Date.now()
+    };
+    if (this._isDuplicate(memory, this.longTerm)) return null;
+    this.longTerm.unshift(memory);
+    await this._pruneAndPersist();
+    return memory;
+  }
+
+  async _pruneAndPersist() {
+    this.longTerm = this.longTerm.filter(m => this.computeDecayWeight(m) > 0.05);
+    if (this.longTerm.length > this.config.longTermLimit) {
+      this.longTerm = this.longTerm
+        .map(m => ({ m, w: this.computeDecayWeight(m) }))
+        .sort((a, b) => b.w - a.w)
+        .slice(0, this.config.longTermLimit)
+        .map(({ m }) => m);
+    }
+    await this.persist();
+  }
+
+  // ── Promotion ─────────────────────────────────────────────────────────────
+
+  async promoteEligible() {
+    const toPromote = this.shortTerm.filter(
+      m => (m.accessCount || 0) >= this.config.promotionThreshold && !m.promoted
+    );
+    for (const memory of toPromote) {
+      memory.promoted = true;
+      memory.source = 'promoted';
+      await this.addLongTerm({ ...memory });
+    }
+    this.shortTerm = this.shortTerm.filter(m => !m.promoted);
+  }
+
+  // ── Deduplication ─────────────────────────────────────────────────────────
+
+  _isDuplicate(newMem, pool) {
+    const embA = newMem.embedding instanceof Float32Array
+      ? newMem.embedding
+      : new Float32Array(newMem.embedding || []);
+    return pool.some(existing => {
+      const embB = existing.embedding instanceof Float32Array
+        ? existing.embedding
+        : new Float32Array(existing.embedding || []);
+      return this.cosineSimilarity(embA, embB) >= this.config.similarityThreshold;
+    });
+  }
+
+  // ── Retrieval ──────────────────────────────────────────────────────────────
+
+  retrieve(queryGoal, options = {}) {
+    const k = options.topK || this.config.topK;
+    const queryEmb = this.embed(queryGoal || '');
+    const pool = [...this.shortTerm, ...this.longTerm];
+    if (!pool.length) return [];
+
+    const scored = pool.map(memory => {
+      const embB = memory.embedding instanceof Float32Array
+        ? memory.embedding
+        : new Float32Array(memory.embedding || []);
+      const similarity = this.cosineSimilarity(queryEmb, embB);
+      const decayWeight = this.computeDecayWeight(memory);
+      const score = similarity * decayWeight;
+      return { memory, score, similarity };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.filter(s => s.score > 0.1).slice(0, k);
+    top.forEach(({ memory }) => { memory.accessCount = (memory.accessCount || 0) + 1; });
+    this.promoteEligible().catch(() => {});
+
+    return top.map(({ memory, score, similarity }) => ({
+      id: memory.id,
+      goal: memory.goal,
+      result: memory.result,
+      sites: memory.sites,
+      timestamp: memory.timestamp,
+      score: Math.round(score * 100) / 100,
+      similarity: Math.round(similarity * 100) / 100,
+      source: memory.source,
+      accessCount: memory.accessCount
+    }));
+  }
+
+  // ── Context Injection ──────────────────────────────────────────────────────
+
+  buildContextString(queryGoal) {
+    const memories = this.retrieve(queryGoal);
+    if (!memories.length) return '';
+    const lines = memories.map((m, i) =>
+      `[Memory ${i + 1}] (relevance: ${m.score}) Goal: "${m.goal}" ` +
+      `Sites: ${(m.sites || []).join(', ')} Result: ${m.result || 'completed'}`
+    );
+    return '\nRELEVANT PAST EXPERIENCE:\n' + lines.join('\n') + '\n';
+  }
+
+  // ── Stats ──────────────────────────────────────────────────────────────────
+
+  getStats() {
+    const activeLong = this.longTerm.filter(m => this.computeDecayWeight(m) > 0.1).length;
+    const decayedLong = this.longTerm.length - activeLong;
+    const avgDecayWeight = this.longTerm.length > 0
+      ? Math.round((this.longTerm.reduce((s, m) => s + this.computeDecayWeight(m), 0) / this.longTerm.length) * 100) / 100
+      : 0;
+    return {
+      shortTermCount: this.shortTerm.length,
+      longTermCount: activeLong,
+      decayedCount: decayedLong,
+      totalCount: this.shortTerm.length + this.longTerm.length,
+      avgDecayWeight,
+      config: this.config
+    };
+  }
+
+  // ── Persistence ────────────────────────────────────────────────────────────
+
+  async persist() {
+    await chrome.storage.local.set({
+      zanysurf_memory_v2: { longTerm: this.longTerm, savedAt: Date.now() }
+    });
+  }
+
+  async restore() {
+    try {
+      const data = await chrome.storage.local.get('zanysurf_memory_v2');
+      if (data.zanysurf_memory_v2?.longTerm) {
+        this.longTerm = data.zanysurf_memory_v2.longTerm.map(m => ({
+          ...m,
+          embedding: m.embedding ? new Float32Array(m.embedding) : Array.from(this.embed(m.goal || ''))
+        }));
+      }
+    } catch (_) {}
+  }
+
+  async clear(scope = 'all') {
+    if (scope === 'short' || scope === 'all') this.shortTerm = [];
+    if (scope === 'long' || scope === 'all') {
+      this.longTerm = [];
+      await chrome.storage.local.remove('zanysurf_memory_v2');
+    }
+  }
+}
+
+const memorySystem = new MemorySystem();
+
+// =============================================================================
+// UPGRADE 3 — ASYNC TASK ENGINE
+// Priority queue, dependency graph, concurrency control, progress aggregation
+// =============================================================================
+class AsyncTaskEngine {
+  constructor() {
+    this.queue       = [];
+    this.active      = new Map();   // taskId → TaskRunner
+    this.completed   = new Map();   // taskId → task object
+    this.maxConcurrent = 3;
+    this.running     = false;
+  }
+
+  createTask(config) {
+    return {
+      id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + Math.random().toString(36)),
+      goal: config.goal,
+      tabId: config.tabId || null,
+      priority: config.priority || 5,
+      dependsOn: config.dependsOn || [],
+      label: config.label || String(config.goal || '').slice(0, 40),
+      metadata: config.metadata || {},
+      status: 'queued',
+      createdAt: Date.now(),
+      startedAt: null,
+      completedAt: null,
+      result: null,
+      error: null,
+      progress: 0,
+      stepCount: 0
+    };
+  }
+
+  enqueue(config) {
+    const task = this.createTask(config);
+    const insertIdx = this.queue.findIndex(t => t.priority > task.priority);
+    if (insertIdx === -1) { this.queue.push(task); } else { this.queue.splice(insertIdx, 0, task); }
+    this.broadcastUpdate();
+    this.tryDispatch();
+    return task;
+  }
+
+  enqueueMany(configs) {
+    return configs.map(c => this.enqueue(c));
+  }
+
+  cancel(taskId) {
+    const qIdx = this.queue.findIndex(t => t.id === taskId);
+    if (qIdx !== -1) { this.queue.splice(qIdx, 1); }
+    if (this.active.has(taskId)) {
+      this.active.get(taskId).cancel();
+      this.active.delete(taskId);
+    }
+    this.broadcastUpdate();
+  }
+
+  cancelAll() {
+    this.queue = [];
+    for (const runner of this.active.values()) runner.cancel();
+    this.active.clear();
+    this.broadcastUpdate();
+  }
+
+  areDepsComplete(task) {
+    return task.dependsOn.every(depId => this.completed.get(depId)?.status === 'done');
+  }
+
+  getDepsOutput(task) {
+    return task.dependsOn.map(depId => this.completed.get(depId)).filter(Boolean);
+  }
+
+  tryDispatch() {
+    if (this.active.size >= this.maxConcurrent) return;
+    if (!this.queue.length) return;
+    const readyIdx = this.queue.findIndex(task => this.areDepsComplete(task));
+    if (readyIdx === -1) {
+      this.queue.forEach(t => { if (!this.areDepsComplete(t)) t.status = 'waiting'; });
+      this.broadcastUpdate();
+      return;
+    }
+    const task = this.queue.splice(readyIdx, 1)[0];
+    this.dispatch(task);
+  }
+
+  dispatch(task) {
+    task.status = 'running';
+    task.startedAt = Date.now();
+    task.progress = 0;
+    const depsOutput = this.getDepsOutput(task);
+    const self = this;
+
+    const runner = new ZanyTaskRunner(task, depsOutput, {
+      onProgress: (step, total) => {
+        task.stepCount = step;
+        task.progress = total > 0 ? Math.round((step / total) * 100) : 0;
+        self.broadcastUpdate();
+      },
+      onComplete: (result) => {
+        task.status = 'done';
+        task.result = result;
+        task.completedAt = Date.now();
+        task.progress = 100;
+        self.completed.set(task.id, task);
+        self.active.delete(task.id);
+        // Store in memory system
+        memorySystem.addShortTerm({
+          goal: task.goal,
+          result: typeof result === 'string' ? result.slice(0, 300) : JSON.stringify(result).slice(0, 300),
+          sites: [],
+          timestamp: Date.now()
+        });
+        self.broadcastUpdate();
+        self.tryDispatch();
+      },
+      onError: (error) => {
+        task.status = 'error';
+        task.error = error.message;
+        task.completedAt = Date.now();
+        self.completed.set(task.id, task);
+        self.active.delete(task.id);
+        self.broadcastUpdate();
+        self.tryDispatch();
+      }
+    });
+
+    this.active.set(task.id, runner);
+    this.broadcastUpdate();
+    runner.run().catch(err => {
+      task.status = 'error';
+      task.error = err.message;
+      this.active.delete(task.id);
+      this.broadcastUpdate();
+    });
+  }
+
+  getAggregatedProgress() {
+    const allTasks = [
+      ...this.queue,
+      ...[...this.active.values()].map(r => r.task),
+      ...[...this.completed.values()]
+    ];
+    if (!allTasks.length) return null;
+    const done    = allTasks.filter(t => t.status === 'done' || t.status === 'error').length;
+    const running = allTasks.filter(t => t.status === 'running').length;
+    const progressSum = allTasks.reduce((s, t) => {
+      if (t.status === 'done' || t.status === 'error') return s + 100;
+      return s + (t.progress || 0);
+    }, 0);
+    return {
+      total: allTasks.length,
+      done,
+      running,
+      queued: this.queue.length,
+      overallProgress: Math.round(progressSum / allTasks.length),
+      isComplete: done === allTasks.length
+    };
+  }
+
+  broadcastUpdate() {
+    broadcast({
+      action: 'TASK_ENGINE_UPDATE',
+      queue: this.queue,
+      active: [...this.active.values()].map(r => r.task),
+      completed: [...this.completed.values()].slice(-20),
+      aggregated: this.getAggregatedProgress()
+    });
+  }
+
+  getSnapshot() {
+    return {
+      queue: this.queue,
+      active: [...this.active.values()].map(r => r.task),
+      completed: [...this.completed.values()].slice(-20),
+      aggregated: this.getAggregatedProgress(),
+      maxConcurrent: this.maxConcurrent
+    };
+  }
+}
+
+class ZanyTaskRunner {
+  constructor(task, depsOutput, callbacks) {
+    this.task        = task;
+    this.depsOutput  = depsOutput;
+    this.callbacks   = callbacks;
+    this.cancelled   = false;
+    this.runToken    = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36);
+  }
+
+  cancel() { this.cancelled = true; }
+
+  async run() {
+    try {
+      let tabId = this.task.tabId;
+      if (!tabId) {
+        const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+        tabId = tab.id;
+        this.task.tabId = tabId;
+      }
+
+      // Register in TabOrchestrator
+      tabOrchestrator.registry.set(tabId, {
+        tabId,
+        url: 'about:blank',
+        label: this.task.label,
+        goal: this.task.goal,
+        status: 'running',
+        openedAt: this.task.startedAt || Date.now(),
+        completedAt: null,
+        runToken: this.runToken,
+        result: null,
+        errorMessage: null,
+        stepCount: 0
+      });
+      tabOrchestrator.broadcastRegistryUpdate();
+
+      // Enrich goal with dependency context
+      let enrichedGoal = this.task.goal;
+      if (this.depsOutput.length > 0) {
+        enrichedGoal += '\n\nContext from prior tasks:\n' +
+          this.depsOutput.map(d => `- ${d.label || d.goal}: ${JSON.stringify(d.result || '').slice(0, 200)}`).join('\n');
+      }
+
+      // Also inject memory context
+      const memCtx = memorySystem.buildContextString(this.task.goal);
+      if (memCtx) enrichedGoal += memCtx;
+
+      const maxSteps = 30;
+      let step = 0;
+      const result = await runAgentLoopOnTab(tabId, enrichedGoal, this.runToken, (s) => {
+        if (this.cancelled) throw new Error('Cancelled');
+        step = s;
+        this.callbacks.onProgress(s, maxSteps);
+        tabOrchestrator.updateTabState(tabId, { stepCount: s, status: 'running' });
+      });
+
+      if (this.cancelled) { tabOrchestrator.storeError(tabId, 'Cancelled'); return; }
+      tabOrchestrator.storeResult(tabId, result);
+      this.callbacks.onComplete(result);
+    } catch (err) {
+      if (!this.cancelled) {
+        tabOrchestrator.storeError(this.task.tabId || 0, err.message);
+        this.callbacks.onError(err);
+      }
+    }
+  }
+}
+
+const asyncTaskEngine = new AsyncTaskEngine();
+
+// Startup: restore memory and tab registry
+(async () => {
+  try {
+    await memorySystem.restore();
+    await tabOrchestrator.restore();
+  } catch (_) {}
+})();
+
 const MODEL_PROFILES = {
   'llama3.2:1b': { speed: 'fast', quality: 'basic', recommended: 'simple tasks' },
   'llama3.2': { speed: 'medium', quality: 'good', recommended: 'most tasks' },
@@ -150,6 +830,10 @@ function cancelActiveRun(reason = 'cancelled', clearHistory = false) {
   agentAbort = true;
   agentActive = false;
   currentAgentTree = [];
+
+  // Close all orchestrated tabs and cancel queued async tasks
+  tabOrchestrator.closeAllOrchestratedTabs().catch(() => {});
+  asyncTaskEngine.cancelAll();
 
   if (clearHistory) {
     actionHistory = [];
@@ -525,6 +1209,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sessionGoal   = '';
     sessionMemory = [];
     tabOrchestrationState = { nodes: {}, dependencies: {}, extracted: {}, lastSynthesis: '' };
+    memorySystem.clear('all').catch(() => {});
     sendResponse({ status: 'cleared' });
     return true;
   }
@@ -538,6 +1223,78 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   if (request.action === 'GET_STATUS') {
     sendResponse({ active: agentActive, steps: actionHistory.length });
+    return true;
+  }
+
+  // ── Tab Orchestrator v2 ──────────────────────────────────────────────────
+  if (request.action === 'GET_TAB_REGISTRY') {
+    sendResponse(tabOrchestrator.getSnapshot());
+    return true;
+  }
+  if (request.action === 'CLOSE_TAB') {
+    tabOrchestrator.closeTab(request.tabId)
+      .then(() => sendResponse({ success: true }))
+      .catch(e => sendResponse({ success: false, error: e.message }));
+    return true;
+  }
+  if (request.action === 'CLOSE_ALL_TABS') {
+    tabOrchestrator.closeAllOrchestratedTabs()
+      .then(() => sendResponse({ success: true }))
+      .catch(e => sendResponse({ success: false, error: e.message }));
+    return true;
+  }
+
+  // ── Memory System v2 ────────────────────────────────────────────────────
+  if (request.action === 'GET_MEMORY_STATS') {
+    sendResponse({ success: true, stats: memorySystem.getStats() });
+    return true;
+  }
+  if (request.action === 'GET_SHORT_TERM') {
+    sendResponse({ success: true, memories: memorySystem.shortTerm });
+    return true;
+  }
+  if (request.action === 'GET_LONG_TERM') {
+    sendResponse({ success: true, memories: memorySystem.longTerm });
+    return true;
+  }
+  if (request.action === 'CLEAR_MEMORY_V2') {
+    memorySystem.clear(request.scope || 'all')
+      .then(() => sendResponse({ success: true }))
+      .catch(e => sendResponse({ success: false, error: e.message }));
+    return true;
+  }
+
+  // ── Async Task Engine ───────────────────────────────────────────────────
+  if (request.action === 'GET_TASK_ENGINE') {
+    sendResponse({ success: true, ...asyncTaskEngine.getSnapshot() });
+    return true;
+  }
+  if (request.action === 'CANCEL_TASK') {
+    asyncTaskEngine.cancel(request.taskId);
+    sendResponse({ success: true });
+    return true;
+  }
+  if (request.action === 'CANCEL_ALL_TASKS') {
+    asyncTaskEngine.cancelAll();
+    sendResponse({ success: true });
+    return true;
+  }
+  if (request.action === 'SET_MAX_CONCURRENT') {
+    asyncTaskEngine.maxConcurrent = Math.max(1, Math.min(5, Number(request.max || 3)));
+    sendResponse({ success: true, maxConcurrent: asyncTaskEngine.maxConcurrent });
+    return true;
+  }
+  if (request.action === 'ENQUEUE_TASKS') {
+    // request.tasks: Array<{ id, goal, priority, dependencies }>
+    const tasks = (request.tasks || []).map(t => ({
+      id          : t.id || crypto.randomUUID(),
+      goal        : t.goal,
+      priority    : t.priority || 5,
+      dependencies: t.dependencies || [],
+      runner      : new ZanyTaskRunner(t.goal, t.priority || 5)
+    }));
+    asyncTaskEngine.enqueueMany(tasks);
+    sendResponse({ success: true, queued: tasks.length });
     return true;
   }
 });
@@ -1247,9 +2004,12 @@ async function runAgentWithPlanning(goal, options = {}) {
 
 async function generatePlan(goal, settings) {
   const memory = await retrieveMemoryContext(goal);
+  // v2: also inject semantic memory context
+  const memV2 = memorySystem.buildContextString(goal);
+  const combinedMemory = [memory, memV2].filter(Boolean).join('\n');
   const prompt = [
     'Goal: ' + goal,
-    memory ? ('Memory:\n' + memory) : 'Memory: (none)',
+    combinedMemory ? ('Memory:\n' + combinedMemory) : 'Memory: (none)',
     '',
     'Break this into 3-7 sequential subtasks.',
     'Each subtask should be completable in under 10 browser actions.',
@@ -1940,6 +2700,97 @@ async function runAgentLoop(userGoal, options = {}) {
     };
   }
   return finalResult;
+}
+
+// =============================================================================
+// MULTI-TAB ENGINE ENTRY POINT
+// Runs the agent loop on a specific tab (called by AsyncTaskEngine / ZanyTaskRunner).
+// Unlike runAgentLoop() this function does NOT touch agentActive / agentAbort globals —
+// each tab-bound run is self-contained and communicates progress via onProgress callback.
+// =============================================================================
+async function runAgentLoopOnTab(tabId, goal, runToken, onProgress) {
+  // Bring the tab into a known-good state without stealing focus
+  try { await chrome.tabs.update(tabId, { active: false }); } catch (_) {}
+  await waitForTabReady(tabId).catch(() => {});
+
+  const MAX_STEPS = 30;
+  let steps = 0;
+  let agentDone = false;
+  const localAbort = () => Number(runToken) !== activeRunToken;
+
+  while (!agentDone && steps < MAX_STEPS && !localAbort()) {
+    steps++;
+    if (typeof onProgress === 'function') onProgress(steps);
+
+    try {
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      if (!tab) break;
+
+      await waitForTabReady(tabId).catch(() => {});
+      await sleep(300);
+
+      const currentUrl   = tab.url   || '';
+      const currentTitle = tab.title || '';
+      if (isChromePage(currentUrl)) break;
+
+      const pageContext = await getPageContext(tabId, false);
+      const domMap      = pageContext.mode === 'dom' ? pageContext.domMap : 'VISION_MODE';
+
+      const settings    = await getSettings();
+      const memCtx      = memorySystem.buildContextString(goal);
+      const historyLines= actionHistory.slice(-6)
+        .map(h => `${h.action}(${h.value || ''}) on ${h.url || ''}`)
+        .join('\n');
+
+      const extraContext = memCtx
+        + '\n[Tab-specific run | tabId=' + tabId + ' | token=' + runToken + ']';
+
+      const prompt   = buildAgentPrompt(
+        goal, domMap, currentUrl, currentTitle, historyLines, extraContext
+      );
+      const raw      = await LLMGateway.callText(
+        prompt, settings.provider, settings.model, settings, {}
+      );
+      const decision = parseAgentDecision(raw);
+      if (!decision) continue;
+
+      if (decision.action === 'done') {
+        agentDone = true;
+        break;
+      }
+
+      const execResult = await chrome.tabs.sendMessage(tabId, {
+        action: 'EXECUTE_ACTION', ...decision
+      }).catch(e => ({ success: false, detail: e.message }));
+
+      actionHistory.push({
+        action : decision.action,
+        value  : decision.value || '',
+        url    : currentUrl,
+        ts     : Date.now(),
+        success: !!execResult?.success
+      });
+
+      if (execResult?.navigated || decision.action === 'navigate') {
+        await sleep(1200);
+        await waitForTabReady(tabId).catch(() => {});
+      }
+    } catch (err) {
+      if (localAbort()) break;
+      if (err.message === 'Cancelled') break;
+      // transient errors — continue to next step
+    }
+  }
+
+  const finalTab = await chrome.tabs.get(tabId).catch(() => null);
+  return {
+    success  : agentDone,
+    steps,
+    message  : agentDone
+      ? 'Task completed in ' + steps + ' steps'
+      : 'Reached step limit or was stopped',
+    finalUrl : finalTab?.url || ''
+  };
 }
 
 // =============================================================================
@@ -3919,6 +4770,18 @@ async function saveTaskHistory(goal, steps, success) {
       zanysurf_short_memory: mergedShort,
       zanysurf_long_memory: longMemory
     });
+
+    // Also persist to MemorySystem v2 for vector retrieval
+    const visitedSites = actionHistory
+      .map(h => { try { return new URL(h.url || h.value || '').hostname; } catch (_) { return ''; } })
+      .filter(Boolean);
+    memorySystem.addShortTerm({
+      goal: goal.substring(0, 200),
+      result: summary,
+      sites: [...new Set(visitedSites)],
+      timestamp: Date.now()
+    });
+    await memorySystem.promoteEligible();
   } catch (_) {}
 }
 

@@ -758,3 +758,123 @@ body.sidepanel-mode { width: 400px; height: 100vh; }
 @media (max-width: 360px) {
   .quick-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* =============================================================================
+   TAB ORCHESTRATOR + TASK ENGINE PANEL STYLES
+   ============================================================================= */
+
+/* Registry / task cards */
+.registry-card,
+.task-engine-card {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: var(--surface2, #1e1e2e);
+  border: 1px solid var(--border, rgba(255,255,255,.08));
+  animation: slideIn .18s ease;
+}
+
+.registry-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.registry-goal {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text1, #cdd6f4);
+}
+
+.registry-meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--text3, #6c7086);
+}
+
+.registry-url {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.registry-close-btn {
+  padding: 0 4px;
+  font-size: 11px;
+  opacity: .55;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.registry-close-btn:hover { opacity: 1; }
+
+/* Status dots */
+.tab-status-dot {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+/* Progress bars */
+.task-progress-bar-wrap {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface3, #313244);
+  margin-top: 6px;
+  overflow: hidden;
+}
+.task-progress-bar-wrap.engine {
+  height: 6px;
+  border-radius: 3px;
+}
+.task-progress-bar {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #89b4fa, #cba6f7);
+  transition: width .4s ease;
+}
+
+/* Task engine aggregate bar */
+.task-engine-bar-wrap {
+  padding: 0 0 10px 0;
+}
+.task-engine-bar-label {
+  font-size: 10px;
+  color: var(--text3, #6c7086);
+  margin-bottom: 4px;
+}
+
+/* Phase badge */
+.task-phase-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  background: var(--surface3, #313244);
+  color: var(--text2, #a6adc8);
+}
+.task-engine-card[data-phase="running"] .task-phase-badge  { background:#313244; color:#89b4fa; }
+.task-engine-card[data-phase="completed"] .task-phase-badge { background:#1e3a2e; color:#a6e3a1; }
+.task-engine-card[data-phase="failed"] .task-phase-badge    { background:#3a1e1e; color:#f38ba8; }
+
+/* Memory decay bar */
+.decay-bar-wrap {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface3, #313244);
+  margin-top: 5px;
+  overflow: hidden;
+}
+.decay-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #f38ba8, #fab387);
+  transition: width .4s ease;
+}
+

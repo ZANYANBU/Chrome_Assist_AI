@@ -119,6 +119,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   showWelcome();
   initTier3Panel();
   initTier4Panel();
+  initTier5Panel();
 
   // ── Settings panel events ───────────────────────────────────────
   settingsBtn.addEventListener('click', () => {
@@ -446,6 +447,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       case 'APPROVAL_REQUEST': {
         removeThinking();
         appendApprovalCard(msg);
+        break;
+      }
+
+      case 'ORCHESTRATOR_UPDATE': {
+        renderTabRegistry(msg.registry || {});
+        break;
+      }
+
+      case 'TASK_ENGINE_UPDATE': {
+        renderTaskEngine(msg);
         break;
       }
 
@@ -1605,6 +1616,169 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (delta < 3600) return Math.floor(delta / 60) + 'm ago';
     if (delta < 86400) return Math.floor(delta / 3600) + 'h ago';
     return Math.floor(delta / 86400) + 'd ago';
+  }
+
+  // ==========================================================================
+  // TIER-5 PANEL — Tab Orchestrator + Task Engine
+  // ==========================================================================
+  function initTier5Panel() {
+    // Tabs view buttons
+    const tabsRefreshBtn  = document.getElementById('tabs-refresh-btn');
+    const tabsCloseAllBtn = document.getElementById('tabs-close-all-btn');
+    if (tabsRefreshBtn) {
+      tabsRefreshBtn.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ action: 'GET_TAB_REGISTRY' }, resp => {
+          renderTabRegistry(resp?.registry || resp || {});
+        });
+      });
+    }
+    if (tabsCloseAllBtn) {
+      tabsCloseAllBtn.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ action: 'CLOSE_ALL_TABS' }, () => {
+          renderTabRegistry({});
+        });
+      });
+    }
+
+    // Tasks view buttons
+    const tasksRefreshBtn  = document.getElementById('tasks-refresh-btn');
+    const tasksCancelAllBtn = document.getElementById('tasks-cancel-all-btn');
+    const setConcBtn       = document.getElementById('set-concurrent-btn');
+    const maxConcInput     = document.getElementById('max-concurrent-input');
+    if (tasksRefreshBtn) {
+      tasksRefreshBtn.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ action: 'GET_TASK_ENGINE' }, resp => {
+          if (resp?.success) renderTaskEngine(resp);
+        });
+      });
+    }
+    if (tasksCancelAllBtn) {
+      tasksCancelAllBtn.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ action: 'CANCEL_ALL_TASKS' });
+        renderTaskEngine({ queue: [], running: [], completed: [], failed: [] });
+      });
+    }
+    if (setConcBtn && maxConcInput) {
+      setConcBtn.addEventListener('click', () => {
+        const max = parseInt(maxConcInput.value, 10) || 3;
+        chrome.runtime.sendMessage({ action: 'SET_MAX_CONCURRENT', max });
+      });
+    }
+
+    // Auto-load when those views are activated
+    document.querySelectorAll('.nav-item').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.view === 'view-tabs') {
+          chrome.runtime.sendMessage({ action: 'GET_TAB_REGISTRY' }, resp => {
+            renderTabRegistry(resp?.registry || resp || {});
+          });
+        }
+        if (btn.dataset.view === 'view-tasks') {
+          chrome.runtime.sendMessage({ action: 'GET_TASK_ENGINE' }, resp => {
+            if (resp?.success) renderTaskEngine(resp);
+          });
+        }
+      });
+    });
+  }
+
+  // ── Tab Registry Renderer ──────────────────────────────────────────────
+  function renderTabRegistry(registry) {
+    const list = document.getElementById('tab-registry-list');
+    if (!list) return;
+    const entries = Object.entries(registry || {});
+    if (!entries.length) {
+      list.innerHTML = '<p class="muted" style="padding:12px">No orchestrated tabs active.</p>';
+      return;
+    }
+    list.innerHTML = entries.map(([tabId, info]) => {
+      const statusDot = { ready: '\uD83D\uDFE2', pending: '\uD83D\uDFE1', running: '\uD83D\uDD35', done: '\u2705', error: '\u274C' }[info.status] || '⚪';
+      const pct = info.stepCount && info.maxSteps ? Math.round((info.stepCount / info.maxSteps) * 100) : 0;
+      return `
+        <div class="registry-card card">
+          <div class="registry-header">
+            <span class="tab-status-dot">${statusDot}</span>
+            <span class="registry-goal">${escHtml(info.goal || 'Tab #' + tabId)}</span>
+            <button class="btn-ghost registry-close-btn" data-tab-id="${tabId}" title="Close tab">✕</button>
+          </div>
+          <div class="registry-meta">
+            <span>Tab ${tabId}</span>
+            ${info.stepCount ? `<span>${info.stepCount} steps</span>` : ''}
+            ${info.url ? `<span class="registry-url">${escHtml(info.url.substring(0, 40))}…</span>` : ''}
+          </div>
+          ${pct > 0 ? `<div class="task-progress-bar-wrap"><div class="task-progress-bar" style="width:${pct}%"></div></div>` : ''}
+        </div>`;
+    }).join('');
+
+    list.querySelectorAll('.registry-close-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tabId = parseInt(btn.dataset.tabId, 10);
+        chrome.runtime.sendMessage({ action: 'CLOSE_TAB', tabId }, () => {
+          btn.closest('.registry-card').remove();
+        });
+      });
+    });
+  }
+
+  // ── Task Engine Renderer ───────────────────────────────────────────────
+  function renderTaskEngine(snapshot) {
+    const list     = document.getElementById('task-engine-list');
+    const progWrap = document.getElementById('task-engine-progress');
+    if (!list) return;
+
+    const allTasks = [
+      ...(snapshot.queue     || []).map(t => ({ ...t, _phase: 'queued'    })),
+      ...(snapshot.running   || []).map(t => ({ ...t, _phase: 'running'   })),
+      ...(snapshot.completed || []).map(t => ({ ...t, _phase: 'completed' })),
+      ...(snapshot.failed    || []).map(t => ({ ...t, _phase: 'failed'    }))
+    ];
+
+    // Aggregate progress bar
+    if (progWrap) {
+      const total     = allTasks.length;
+      const donePct   = total ? Math.round(((snapshot.completed || []).length / total) * 100) : 0;
+      progWrap.innerHTML = total
+        ? `<div class="task-engine-bar-label">${(snapshot.completed||[]).length}/${total} tasks — ${donePct}%</div>
+           <div class="task-progress-bar-wrap engine"><div class="task-progress-bar" style="width:${donePct}%"></div></div>`
+        : '';
+    }
+
+    if (!allTasks.length) {
+      list.innerHTML = '<p class="muted" style="padding:12px">No tasks queued.</p>';
+      return;
+    }
+
+    const phaseIcon = { queued: '⏳', running: '⚡', completed: '✅', failed: '❌' };
+    list.innerHTML = allTasks.map(t => {
+      const icon = phaseIcon[t._phase] || '•';
+      return `
+        <div class="task-engine-card card" data-phase="${t._phase}">
+          <div class="registry-header">
+            <span>${icon}</span>
+            <span class="registry-goal">${escHtml(t.goal || t.id || '(task)')}</span>
+            ${t._phase === 'running' || t._phase === 'queued'
+              ? `<button class="btn-ghost registry-close-btn" data-task-id="${t.id}" title="Cancel">✕</button>`
+              : ''}
+          </div>
+          <div class="registry-meta">
+            <span>Priority ${t.priority || 5}</span>
+            ${t.progress !== undefined ? `<span>Step ${t.progress}</span>` : ''}
+            <span class="task-phase-badge">${t._phase}</span>
+          </div>
+        </div>`;
+    }).join('');
+
+    list.querySelectorAll('.registry-close-btn[data-task-id]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ action: 'CANCEL_TASK', taskId: btn.dataset.taskId }, () => {
+          btn.closest('.task-engine-card').remove();
+        });
+      });
+    });
+  }
+
+  function escHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 });
 
