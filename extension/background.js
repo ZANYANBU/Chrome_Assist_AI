@@ -1570,6 +1570,135 @@ function parseTimeToHourMinute(token) {
   return [hours % 24, Math.min(Math.max(minutes, 0), 59)];
 }
 
+function classifyUserIntent(text) {
+  const raw = String(text || '').trim();
+  const lower = raw.toLowerCase();
+  const isGreeting = /^(hi|hello|hey|yo|sup|howdy|greetings)\b/.test(lower);
+  const isSmallTalk = /(how are you|how's it going|hows it going|what's up|whats up|how r u|how are u|good morning|good evening)/.test(lower);
+  const isThanks = /^(thanks|thank you|thx|ty)\b/.test(lower);
+  const hasUrl = /(https?:\/\/|www\.|\b[a-z0-9-]+\.(com|org|net|io|co|dev|ai)\b)/i.test(raw);
+  const taskVerbs = /(open|go to|visit|navigate|search|find|look for|compare|price|buy|order|checkout|book|schedule|fill|submit|apply|sign in|log in|login|download|upload|click|type|scroll|collect|extract|scrape|summarize|research|draft|write|analyze|report|compose|send|email)/i;
+  const infoVerbs = /(what is|who is|tell me about|explain|define|meaning of)/i;
+  const isQuestion = /\?$/.test(raw) || /^(who|what|where|when|why|how)\b/.test(lower);
+  const wordCount = raw.split(/\s+/).filter(Boolean).length;
+
+  if (isGreeting || isSmallTalk || isThanks) return { mode: 'chat', reason: 'smalltalk' };
+  if (wordCount <= 3 && !taskVerbs.test(lower) && !hasUrl) return { mode: 'chat', reason: 'short' };
+  if ((isQuestion || infoVerbs.test(lower)) && !taskVerbs.test(lower) && !hasUrl) return { mode: 'chat', reason: 'question' };
+  return { mode: 'task', reason: 'task' };
+}
+
+function buildCannedChatReply(intent, text) {
+  const lower = String(text || '').toLowerCase();
+  if (intent.reason === 'smalltalk' && /(how are you|how's it going|hows it going)/.test(lower)) {
+    return 'I am doing well, thanks for asking. What can I help you with today?';
+  }
+  if (intent.reason === 'smalltalk' || intent.reason === 'short') {
+    return 'Hi. How can I help you today?';
+  }
+  if (intent.reason === 'question') {
+    if (/price|compare|find|search|open|navigate|visit/.test(lower)) {
+      return 'Do you want me to browse the web for this, or just answer directly?';
+    }
+    return null;
+  }
+  return null;
+}
+
+function clampText(text, maxChars) {
+  const value = String(text || '');
+  if (!maxChars || value.length <= maxChars) return value;
+  return value.substring(0, maxChars) + '...';
+}
+
+function buildOpenTabsContext(tabs, limit = 6) {
+  const items = (tabs || [])
+    .filter(tab => tab.url && !tab.url.startsWith('chrome'))
+    .slice(0, Math.max(1, limit));
+  if (!items.length) return '--- LONG CONTEXT MEMORY: OPEN TABS ---\n(none)';
+  const lines = items.map(tab => '[@' + tab.id + '] ' + (tab.title || 'Untitled') + ' | ' + tab.url);
+  return '--- LONG CONTEXT MEMORY: OPEN TABS ---\n' + lines.join('\n');
+}
+
+function extractSearchQuery(goal) {
+  const raw = String(goal || '').trim();
+  if (!raw) return '';
+  const quoted = raw.match(/"([^"]+)"|'([^']+)'/);
+  if (quoted) return (quoted[1] || quoted[2] || '').trim();
+  const forMatch = raw.match(/(?:for|about)\s+(.+?)(?:\s+on|\s+in|\s+at|$)/i);
+  if (forMatch) return forMatch[1].trim();
+  return raw.replace(/^(compare|price|prices|find|search|look for)\s+/i, '').trim();
+}
+
+function extractMarketplaceList(goal) {
+  const gl = String(goal || '').toLowerCase();
+  const markets = [];
+  if (gl.includes('amazon')) markets.push('amazon');
+  if (gl.includes('walmart')) markets.push('walmart');
+  if (gl.includes('best buy') || gl.includes('bestbuy')) markets.push('bestbuy');
+  if (gl.includes('target')) markets.push('target');
+  if (gl.includes('newegg')) markets.push('newegg');
+  if (gl.includes('ebay')) markets.push('ebay');
+  return markets;
+}
+
+function buildMarketplaceSearchUrls(goal, markets = []) {
+  const query = extractSearchQuery(goal);
+  if (!query) return [];
+  const q = encodeURIComponent(query);
+  const list = markets.length ? markets : ['amazon', 'walmart', 'bestbuy', 'target'];
+  const urls = [];
+  for (const market of list) {
+    if (market === 'amazon') urls.push('https://www.amazon.com/s?k=' + q);
+    if (market === 'walmart') urls.push('https://www.walmart.com/search?q=' + q);
+    if (market === 'bestbuy') urls.push('https://www.bestbuy.com/site/searchpage.jsp?st=' + q);
+    if (market === 'target') urls.push('https://www.target.com/s?searchTerm=' + q);
+    if (market === 'newegg') urls.push('https://www.newegg.com/p/pl?d=' + q);
+    if (market === 'ebay') urls.push('https://www.ebay.com/sch/i.html?_nkw=' + q);
+  }
+  return urls;
+}
+
+function isPriceCompareGoal(goal) {
+  const gl = String(goal || '').toLowerCase();
+  const compare = /compare|price|prices|cheapest|lowest|deal|cost/.test(gl);
+  const query = extractSearchQuery(goal);
+  return { isCompare: compare && !!query, query, markets: extractMarketplaceList(goal) };
+}
+
+function getDomBudget() {
+  const base = 3200;
+  const contextSize = String(globalMemoryContext || '').length;
+  if (contextSize > 3500) return 2000;
+  if (contextSize > 2000) return 2400;
+  return base;
+}
+
+async function respondWithChatMessage(userText, intent, options = {}) {
+  const canned = buildCannedChatReply(intent, userText);
+  if (canned) {
+    broadcast({ action: 'AGENT_CHAT', reply: canned });
+    return;
+  }
+
+  try {
+    const settings = await getSettings();
+    const prompt = [
+      'You are a helpful assistant in a browser agent UI.',
+      'Reply conversationally in 1-3 short sentences.',
+      'If the user seems to want a web task, ask a brief clarifying question.',
+      'Return JSON only: {"reply":"..."}',
+      'User message: ' + String(userText || '').trim()
+    ].join('\n');
+    const raw = await LLMGateway.callText(prompt, settings.provider, settings.model, settings, { mode: 'summary' });
+    const parsed = parseMaybeJson(raw) || extractJSON(raw);
+    const reply = String(parsed?.reply || raw || '').trim();
+    broadcast({ action: 'AGENT_CHAT', reply: reply || 'How can I help?' });
+  } catch (error) {
+    broadcast({ action: 'AGENT_CHAT', reply: 'How can I help?' });
+  }
+}
+
 async function runAgentEntry(prompt, options = {}) {
   const safePrompt = String(prompt || '').trim();
   if (!safePrompt) {
@@ -1581,6 +1710,13 @@ async function runAgentEntry(prompt, options = {}) {
   const runToken = Number(options.runToken || activeRunToken);
   if (!isRunTokenCurrent(runToken)) return;
   currentAgentTree = [];
+
+  const intent = classifyUserIntent(safePrompt);
+  if (intent.mode === 'chat') {
+    await respondWithChatMessage(safePrompt, intent, options);
+    return;
+  }
+
   const resumed = await detectGoalContinuation(safePrompt);
   if (!isRunTokenCurrent(runToken) || agentAbort) return;
   if (resumed?.isContinuation) {
@@ -1594,11 +1730,12 @@ async function runAgentEntry(prompt, options = {}) {
   try {
     await saveQuickRunGoal(safePrompt);
     let result;
-    const shouldUseOrchestrator = !!options.multiAgent || /research|compare|analyze|summary|report|draft|write/i.test(safePrompt);
+    const priceIntent = isPriceCompareGoal(safePrompt);
+    const shouldUseOrchestrator = !!options.multiAgent || /research|analyze|summary|report|draft|write/i.test(safePrompt);
     if (shouldUseOrchestrator) {
       result = await OrchestratorAgent.run(safePrompt, { ...options, runId: currentAgentRunId, runToken });
     } else {
-      result = await runAgentWithPlanning(safePrompt, { ...options, runToken });
+      result = await runAgentWithPlanning(safePrompt, { ...options, runToken, priceIntent });
     }
     if (!isRunTokenCurrent(runToken) || agentAbort) return;
     await persistSessionState({ prompt: safePrompt, result, completed: true });
@@ -1945,7 +2082,7 @@ async function runAgentWithPlanning(goal, options = {}) {
     };
   }
 
-  const plan = await generatePlan(goal, settings);
+  const plan = await generatePlan(goal, settings, options.priceIntent);
   if (!options.silent) {
     broadcast({ action: 'AGENT_PLAN', goal, plan });
   }
@@ -2020,7 +2157,42 @@ async function runAgentWithPlanning(goal, options = {}) {
   };
 }
 
-async function generatePlan(goal, settings) {
+async function generatePlan(goal, settings, priceIntent = null) {
+  if (priceIntent?.isCompare) {
+    const markets = priceIntent.markets && priceIntent.markets.length
+      ? priceIntent.markets
+      : ['amazon', 'walmart', 'bestbuy', 'target'];
+    const marketLabels = markets.map(m => m.charAt(0).toUpperCase() + m.slice(1));
+    const steps = [
+      {
+        id: 's1',
+        task: 'Open price comparison tabs for ' + priceIntent.query + ' on ' + marketLabels.join(', '),
+        dependsOn: [],
+        expectedOutcome: 'Marketplace search tabs opened'
+      }
+    ];
+    markets.forEach((market, index) => {
+      steps.push({
+        id: 's' + (index + 2),
+        task: 'Extract prices from ' + market + ' results for ' + priceIntent.query,
+        dependsOn: ['s1'],
+        expectedOutcome: 'Prices captured from ' + market
+      });
+    });
+    steps.push({
+      id: 's' + (markets.length + 2),
+      task: 'Synthesize extracted prices and highlight the best deal',
+      dependsOn: steps.map(step => step.id).filter(id => id !== 's1'),
+      expectedOutcome: 'Comparison summary ready'
+    });
+    steps.push({
+      id: 's' + (markets.length + 3),
+      task: 'Export the comparison to CSV',
+      dependsOn: ['s' + (markets.length + 2)],
+      expectedOutcome: 'CSV exported'
+    });
+    return { steps };
+  }
   const memory = await retrieveMemoryContext(goal);
   // v2: also inject semantic memory context
   const memV2 = memorySystem.buildContextString(goal);
@@ -2148,15 +2320,10 @@ async function runAgentLoop(userGoal, options = {}) {
 
   try {
     const allTabs = await chrome.tabs.query({});
-    let memoryStr = '--- LONG CONTEXT MEMORY: OPEN TABS ---\n';
-    for (const t of allTabs) {
-      if (t.url && !t.url.startsWith('chrome')) {
-        memoryStr += `[@${t.id}] Title: ${t.title || 'Untitled'} | URL: ${t.url}\n`;
-      }
-    }
+    let memoryStr = buildOpenTabsContext(allTabs, 6);
     const memoryContext = await retrieveMemoryContext(userGoal);
     if (memoryContext) {
-      memoryStr += '\n--- VECTOR MEMORY RECALL ---\n' + memoryContext;
+      memoryStr += '\n--- VECTOR MEMORY RECALL ---\n' + clampText(memoryContext, 1400);
     }
     globalMemoryContext = memoryStr;
   } catch(e) {}
@@ -2904,6 +3071,24 @@ function validateDoneAction(decision, goal, currentUrl, history) {
 function applyGuards(decision, goal, url, title, step, history, domMap) {
   const isSystemPage = isChromePage(url);
   const unmappable = domMap === 'UNMAPPABLE' || domMap === 'EMPTY';
+  const isVision = domMap === 'VISION_MODE';
+
+  if (step === 1 && (!history || history.length === 0)) {
+    const priceIntent = isPriceCompareGoal(goal);
+    if (priceIntent.isCompare) {
+      const urls = buildMarketplaceSearchUrls(goal, priceIntent.markets);
+      if (urls.length >= 2) {
+        return {
+          thought: 'I will open comparison tabs across marketplaces to gather prices quickly.',
+          action: 'open_tabs',
+          value: urls.join('|'),
+          element_id: null,
+          depends_on: [],
+          is_complete: false
+        };
+      }
+    }
+  }
 
   // Cannot interact with chrome:// pages
   if (['click','type','hover','select','fill_form','inspect_form','extract_data','extract_text','drag_drop','upload_file','enter_iframe','context_click','shortcut','execute_js','compose_email','book_slot','login_saved'].includes(decision.action) && unmappable) {
@@ -3007,6 +3192,21 @@ function applyGuards(decision, goal, url, title, step, history, domMap) {
     }
   }
 
+  if (isVision && ['click','hover','select'].includes(decision.action)) {
+    if ((decision.element_id === null || decision.element_id === undefined) && decision.x !== null && decision.y !== null) {
+      return { ...decision, action: 'click_coords' };
+    }
+    if (decision.action === 'click' && (decision.element_id === null || decision.element_id === undefined)) {
+      return {
+        thought: 'I need clearer targets in vision mode. Scrolling to reveal more content.',
+        action: 'scroll',
+        value: 'down',
+        element_id: null,
+        is_complete: false
+      };
+    }
+  }
+
   // element_id fallback for type action
   if (decision.action === 'type' &&
       (decision.element_id === null || decision.element_id === undefined) &&
@@ -3021,7 +3221,7 @@ function applyGuards(decision, goal, url, title, step, history, domMap) {
 // LLM PROMPT
 // =============================================================================
 async function getNextAction(goal, domMap, history, settings, currentUrl, pageTitle, stepNum, pageContext = null) {
-  const MAX_DOM  = 3200;
+  const MAX_DOM  = getDomBudget();
   const unmappable = domMap === 'UNMAPPABLE' || domMap === 'EMPTY';
   const trimmedDom = !unmappable && domMap.length > MAX_DOM
     ? domMap.substring(0, MAX_DOM) + '\n� [DOM truncated � use scroll to see more elements]'
@@ -3108,6 +3308,7 @@ async function getNextAction(goal, domMap, history, settings, currentUrl, pageTi
     '12. Never repeat the same failed action+element_id.\n' +
     '13. Scroll down to reveal more elements if the target is not visible.\n' +
     '14. For compare/research tasks, use open_tabs -> wait_tab/activate_tab -> extract_data per tab -> synthesize -> export_csv/copy_clipboard.\n' +
+    '14b. For price comparisons, open_tabs with multiple marketplace search URLs in step 1.\n' +
     '15. Respect tab dependency graphs: do not activate a dependent tab before required tabs are extracted.\n' +
     '16. For forms, call inspect_form first, then fill_form, then re-check for validation errors before done.\n\n' +
     '17. In vision mode, prefer click_coords with clear x,y values from visible UI.\n' +
@@ -3776,6 +3977,21 @@ function getSiteHints(url) {
   if (u.includes('amazon.com')) {
     return 'On Amazon: the search box has id="twotabsearchtextbox". Search results are article or div.s-result-item elements. Product titles are <a> tags.';
   }
+  if (u.includes('walmart.com')) {
+    return 'On Walmart: the search box is input[type="search"]. Product tiles are <a> links. Prices often have data-automation-id containing "price".';
+  }
+  if (u.includes('bestbuy.com')) {
+    return 'On Best Buy: the search box has id="gh-search-input". Product titles are <a> links. Prices are in div.priceView-hero-price or data-testid containing "customer-price".';
+  }
+  if (u.includes('target.com')) {
+    return 'On Target: the search box has id="search". Product cards are <a> links. Prices often appear in span[data-test="product-price"].';
+  }
+  if (u.includes('newegg.com')) {
+    return 'On Newegg: search box id="haQuickSearchBox". Product titles are <a> links. Prices are in li.price-current.';
+  }
+  if (u.includes('ebay.com')) {
+    return 'On eBay: search box id="gh-ac". Product titles are <a> links. Prices often in span.s-item__price.';
+  }
   if (u.includes('reddit.com')) {
     return 'On Reddit: posts are <a> tags with titles. The search box has placeholder "Search Reddit". Subreddit links start with /r/. Upvoted/hot posts are at the top.';
   }
@@ -3806,6 +4022,7 @@ function buildCompletionHint(goal, currentUrl) {
   const gl = goal.toLowerCase();
   const ul = currentUrl.toLowerCase();
 
+  const priceIntent = isPriceCompareGoal(goal);
   const isSearch  = /search|find|look for|query/i.test(gl);
   const isOpen    = /open|go to|navigate|visit/i.test(gl) && !isSearch;
   const isClick   = /click|press|tap/i.test(gl);
@@ -3815,6 +4032,12 @@ function buildCompletionHint(goal, currentUrl) {
   // Extract site name from common patterns
   const siteMatch = gl.match(/(?:on|to|at|open)\s+([\w\s]+?)(?:\s+and|\s+for|\s*$)/i);
   const siteName  = siteMatch ? siteMatch[1].trim() : '';
+
+  if (priceIntent.isCompare) {
+    return 'Prices from multiple marketplaces have been extracted and summarized. ' +
+           'A best deal or range is clearly stated. ' +
+           'Example done thought: "I compared prices across marketplaces and summarized the best option."';
+  }
 
   if (isSearch) {
     const queryMatch = goal.match(/(?:for|about)\s+["']?(.+?)["']?(?:\s+on|\s+in|\s+at|$)/i);
@@ -3896,6 +4119,12 @@ function buildSearchUrl(goal) {
   if (sl.includes('github'))       return 'https://github.com/search?q=' + q + '&type=repositories';
   if (sl.includes('google'))       return 'https://www.google.com/search?q=' + q;
   if (sl.includes('amazon'))       return 'https://www.amazon.com/s?k=' + q;
+  if (sl.includes('walmart'))      return 'https://www.walmart.com/search?q=' + q;
+  if (sl.includes('best buy') || sl.includes('bestbuy'))
+                                   return 'https://www.bestbuy.com/site/searchpage.jsp?st=' + q;
+  if (sl.includes('target'))       return 'https://www.target.com/s?searchTerm=' + q;
+  if (sl.includes('newegg'))       return 'https://www.newegg.com/p/pl?d=' + q;
+  if (sl.includes('ebay'))         return 'https://www.ebay.com/sch/i.html?_nkw=' + q;
   if (sl.includes('reddit'))       return 'https://www.reddit.com/search/?q=' + q;
   if (sl.includes('bing'))         return 'https://www.bing.com/search?q=' + q;
   if (sl.includes('duckduckgo'))   return 'https://duckduckgo.com/?q=' + q;
@@ -4039,7 +4268,8 @@ function buildVisionPrompt() {
     'You are in browser vision mode.',
     'Identify the most relevant interactive UI controls from the screenshot.',
     'Estimate click coordinates in viewport pixels.',
-    'When needed, return action click_coords with x and y.'
+    'Prefer returning action click_coords with x and y when elements are visible.',
+    'If multiple choices exist, pick the most likely primary action.'
   ].join(' ');
 }
 
@@ -4123,8 +4353,8 @@ async function retrieveMemoryContext(goal) {
 }
 
 async function buildRuntimeMemoryContext(goal, currentUrl) {
-  const recalled = await retrieveMemoryContext(goal + ' ' + currentUrl);
-  const orchestration = buildOrchestrationContext();
+  const recalled = clampText(await retrieveMemoryContext(goal + ' ' + currentUrl), 1200);
+  const orchestration = clampText(buildOrchestrationContext(), 600);
   return [recalled, orchestration ? ('--- TAB GRAPH ---\n' + orchestration) : ''].filter(Boolean).join('\n\n');
 }
 

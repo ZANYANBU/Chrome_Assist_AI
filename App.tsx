@@ -2,6 +2,14 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Chrome, 
+  Video,
+  Layers,
+  FileText,
+  Globe,
+  Gauge,
+  BadgeDollarSign,
+  Bot,
+  Plug,
   Cpu, 
   Settings, 
   Code2, 
@@ -96,10 +104,14 @@ export default function App() {
             
             <div className="space-y-4">
               {[
-                { title: 'Autonomous Agent Loop', desc: 'Executes multi-step tasks by clicking, typing, and scrolling.', icon: <Zap /> },
-                { title: 'DOM Annotation', desc: 'Visualizes interactive elements with unique IDs for AI mapping.', icon: <Layout /> },
-                { title: 'Live Execution Log', desc: 'Watch the AI\'s thought process and actions in real-time.', icon: <Terminal /> },
-                { title: 'Local & Cloud LLMs', desc: 'Seamlessly switch between Gemini 1.5 Flash and Ollama.', icon: <Cpu /> },
+                { title: 'Summarize YouTube', desc: 'Extract key takeaways from hours-long videos and jump to timestamps.', icon: <Video /> },
+                { title: 'All-in-One Subscription', desc: 'Access top models in one place: GPT, Claude 4, Perplexity, Gemini, Llama, and more.', icon: <Layers /> },
+                { title: 'Chat with PDFs & Pages', desc: 'Drag and drop PDF, DOC, TXT, or XLS and get answers in seconds.', icon: <FileText /> },
+                { title: 'Dive the Web', desc: 'Research anything on any website with answers and source citations.', icon: <Globe /> },
+                { title: 'Response Faster', desc: 'Set your tone of voice and craft emails, replies, or tweets in seconds.', icon: <Gauge /> },
+                { title: 'Monitor Prices', desc: 'Track price drops and back-in-stock alerts on Amazon, AliExpress, Walmart, and eBay.', icon: <BadgeDollarSign /> },
+                { title: 'Automate Your Work', desc: 'Build AI-powered automations that navigate, extract, click, and fill forms.', icon: <Bot /> },
+                { title: 'Integrate with 1000+ Apps', desc: 'Connect to Make.com and Zapier for cross-app workflows.', icon: <Plug /> },
               ].map((feature, i) => (
                 <motion.div 
                   key={i}

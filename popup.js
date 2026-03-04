@@ -427,6 +427,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         break;
       }
 
+      case 'AGENT_CHAT': {
+        removeThinking();
+        setIdle();
+        setHealth('Idle');
+        appendCard('system', '💬 Chat', msg.reply || msg.message || '');
+        break;
+      }
+
       case 'AGENT_SCHEDULED': {
         removeThinking();
         setIdle();

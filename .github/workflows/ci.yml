@@ -1,0 +1,57 @@
+name: ZANYSURF CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Unit Tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm test -- --runInBand
+      
+  validate:
+    runs-on: ubuntu-latest
+    name: Static Validation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Check root/extension sync
+        run: |
+          for f in background.js content.js popup.js popup.html popup.css manifest.json; do
+            if ! diff -q "$f" "extension/$f" > /dev/null 2>&1; then
+              echo "SYNC FAIL: $f differs from extension/$f"
+              exit 1
+            fi
+          done
+          echo "All files synced ✅"
+
+  build:
+    runs-on: ubuntu-latest
+    name: Build
+    needs: [test, validate]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zanysurf-build
+          path: '*.zip'
