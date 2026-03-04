@@ -18,11 +18,15 @@ Run natural-language goals as auditable browser workflows with local or cloud LL
 ## Table of Contents
 
 - [Executive Summary](#executive-summary)
+- [Reality Check](#reality-check)
 - [Capability Matrix](#capability-matrix)
 - [System Architecture](#system-architecture)
 - [Detailed Runtime Workflows](#detailed-runtime-workflows)
 - [Feature Specification](#feature-specification)
 - [Provider and Model Support](#provider-and-model-support)
+- [Engineering Ownership Standard](#engineering-ownership-standard)
+- [Edge Port Strategy](#edge-port-strategy)
+- [Product Roadmap](#product-roadmap)
 - [Setup and Runbook](#setup-and-runbook)
 - [Security and Compliance](#security-and-compliance)
 - [Testing and Quality Assurance](#testing-and-quality-assurance)
@@ -48,6 +52,19 @@ ZANYSURF is a production-grade autonomous browser agent implemented entirely in 
 - Release version: `2.0.0`
 - Test baseline: `15/15` unit tests passing
 - Store readiness: ready with final privacy-policy URL pending publication
+
+---
+
+## Reality Check
+
+| What GitHub may show at a glance | What is actually built |
+|---|---|
+| Small visible commit window | Multi-month iteration across runtime, UI, safety, memory, and orchestration |
+| Basic README impression | Full production runbook + architecture + workflows |
+| Simple provider setup assumption | 7 providers including Edge built-in zero-key path |
+| No obvious release metadata | `v2.0.0` tagged release-ready codebase |
+
+This repository now reflects the real V2 platform state, not an early V1 snapshot.
 
 ---
 
@@ -200,13 +217,79 @@ UI consumes event stream:
 
 ### Providers
 - Local: `ollama`
+- Local (Edge): `edge_builtin` (`phi-3-mini`, zero API key when available)
 - Cloud: `gemini`, `openai`, `claude`, `groq`, `mistral`
 
 ### Model operations
 - Provider-specific model selectors
 - Ollama model auto-detection
+- Edge built-in model support with runtime availability check
 - Goal-based recommendation helper
 - Per-provider call/latency/success metrics in UI
+
+---
+
+## Engineering Ownership Standard
+
+AI acceleration is a force multiplier, but ownership quality is measured by independent mastery of core internals.
+
+### Ownership checks for core systems
+- Can you rewrite `buildDomMap()` from scratch without generation help?
+- Can you explain and defend retrieval strategy choices (e.g., cosine similarity tradeoffs)?
+- Can you debug a failing run-loop step from logs and telemetry without external prompts?
+- Can you extend provider routing/safety flow confidently under time pressure?
+
+If any answer is no, treat that area as a priority for deliberate deepening (design notes, tests, and manual drills).
+
+---
+
+## Edge Port Strategy
+
+Edge is Chromium-based, so extension parity is high. The strategic advantage is built-in AI availability on newer Edge builds.
+
+### What changes for Edge
+- Runtime provider added: `edge_builtin`
+- Model path: `phi-3-mini`
+- API key requirement: none
+- UX message: clear fallback when built-in AI is unavailable
+
+### Manifest note
+To avoid breaking Chrome packaging, keep Chrome manifest as primary and use Edge-specific manifest variant for Edge store packaging. See:
+- [manifest.edge.json](manifest.edge.json)
+- [extension/manifest.edge.json](extension/manifest.edge.json)
+
+### Edge distribution advantage
+- Chrome Web Store: one-time fee + slower review
+- Edge Add-ons: free submission + typically faster review
+- Firefox AMO: free submission
+
+One codebase can be packaged for three stores to increase reach.
+
+---
+
+## Product Roadmap
+
+### Phase 1 — Ship and distribute (this week)
+- Push complete V2 repository state and tag releases
+- Keep README aligned with production feature reality
+- Publish release asset package and changelog
+- Submit Edge Add-ons first for fast, free validation
+
+### Phase 2 — First real users (month 1)
+- Launch in technical communities
+- Fix first real-user bug wave quickly
+- Add feedback channels (Discussions + landing page)
+- Track early retention and repeat-use signals
+
+### Phase 3 — Differentiation (months 2-3)
+- Mature Edge zero-setup mode as lead differentiator
+- Expand cross-browser support
+- Focus deeply on one killer use case for repeat value
+
+### Phase 4 — Sustainability (months 3-6)
+- Introduce freemium strategy
+- Expand workflow sharing and advanced memory features
+- Apply to startup/accelerator opportunities with real usage data
 
 ---
 

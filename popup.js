@@ -169,7 +169,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         openai: 'OpenAI API Key · https://platform.openai.com/api-keys',
         claude: 'Anthropic API Key · https://console.anthropic.com',
         groq: 'Groq API Key · https://console.groq.com',
-        mistral: 'Mistral API Key · https://console.mistral.ai'
+        mistral: 'Mistral API Key · https://console.mistral.ai',
+        edge_builtin: 'Edge built-in AI (Phi-3) · no API key required'
       };
       providerKeyHelp.textContent = labels[provider] || 'Local provider does not require API key.';
     }
@@ -213,6 +214,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       claudeModel: provider === 'claude' ? model : undefined,
       groqModel: provider === 'groq' ? model : undefined,
       mistralModel: provider === 'mistral' ? model : undefined,
+      edgeBuiltinModel: provider === 'edge_builtin' ? model : undefined,
     });
     settingsPanel.classList.add('hidden');
     await updateProvider();
@@ -1330,10 +1332,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function loadSettingsState() {
-    const s = await chrome.storage.local.get(['provider','ollamaUrl','ollamaModel','model']).catch(() => ({}));
+    const s = await chrome.storage.local.get(['provider','ollamaUrl','ollamaModel','edgeBuiltinModel','model']).catch(() => ({}));
     if (s.provider) providerSel.value = s.provider;
     if (s.ollamaUrl) ollamaUrl.value = s.ollamaUrl;
-    const selectedModel = s.model || s.ollamaModel || 'llama3';
+    const selectedModel = s.model || s.ollamaModel || s.edgeBuiltinModel || (providerSel.value === 'edge_builtin' ? 'phi-3-mini' : 'llama3');
     ollamaModel.value = selectedModel;
     await updateProvider();
     providerModelSelect.value = selectedModel;

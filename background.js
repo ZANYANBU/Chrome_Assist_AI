@@ -3,7 +3,7 @@
  * Fully autonomous chain-of-thought browser agent with robust JSON parsing,
  * multi-provider LLM support, and reliable browser control.
  *
- * Supported providers: Ollama (local) | Gemini API
+ * Supported providers: Ollama (local) | Gemini API | OpenAI | Claude | Groq | Mistral | Edge built-in AI
  * Actions: navigate, click, type, key, scroll, wait, select, hover, done
  */
 
@@ -53,7 +53,8 @@ const PROVIDER_MODELS = {
   openai: ['gpt-4o','gpt-4o-mini','gpt-4-turbo','gpt-3.5-turbo','o1-mini','o3-mini'],
   claude: ['claude-opus-4-5','claude-sonnet-4-5','claude-haiku-4-5'],
   groq: ['llama-3.3-70b-versatile','llama-3.1-8b-instant','mixtral-8x7b-32768','gemma2-9b-it'],
-  mistral: ['mistral-large-latest','mistral-small-latest','open-mistral-7b','open-mixtral-8x7b']
+  mistral: ['mistral-large-latest','mistral-small-latest','open-mistral-7b','open-mixtral-8x7b'],
+  edge_builtin: ['phi-3-mini']
 };
 
 const EXECUTE_JS_PRESETS = [
@@ -89,7 +90,7 @@ const STORAGE_KEYS = {
 async function getSettings() {
   const stored = await chrome.storage.local.get([
     'provider', 'model', 'ollamaUrl', 'ollamaModel', 'apiKey',
-    'openaiModel', 'claudeModel', 'groqModel', 'mistralModel', 'geminiModel'
+    'openaiModel', 'claudeModel', 'groqModel', 'mistralModel', 'geminiModel', 'edgeBuiltinModel'
   ]);
   const provider = String(stored.provider || 'ollama').toLowerCase();
   const providerModels = {
@@ -98,7 +99,8 @@ async function getSettings() {
     openai: stored.openaiModel || stored.model || 'gpt-4o-mini',
     claude: stored.claudeModel || stored.model || 'claude-haiku-4-5',
     groq: stored.groqModel || stored.model || 'llama-3.1-8b-instant',
-    mistral: stored.mistralModel || stored.model || 'mistral-small-latest'
+    mistral: stored.mistralModel || stored.model || 'mistral-small-latest',
+    edge_builtin: stored.edgeBuiltinModel || stored.model || 'phi-3-mini'
   };
   const keyMap = await loadProviderApiKeys();
   const providerKey = keyMap[provider] || '';
@@ -2475,9 +2477,30 @@ function getProviderConfig(provider) {
     openai: { requiresKey: true, defaultModel: 'gpt-4o-mini', models: PROVIDER_MODELS.openai },
     claude: { requiresKey: true, defaultModel: 'claude-haiku-4-5', models: PROVIDER_MODELS.claude },
     groq: { requiresKey: true, defaultModel: 'llama-3.1-8b-instant', models: PROVIDER_MODELS.groq },
-    mistral: { requiresKey: true, defaultModel: 'mistral-small-latest', models: PROVIDER_MODELS.mistral }
+    mistral: { requiresKey: true, defaultModel: 'mistral-small-latest', models: PROVIDER_MODELS.mistral },
+    edge_builtin: { requiresKey: false, defaultModel: 'phi-3-mini', models: PROVIDER_MODELS.edge_builtin }
   };
   return configs[normalized] || configs.ollama;
+}
+
+function getEdgeBuiltinAI() {
+  return globalThis?.ai || null;
+}
+
+async function callEdgeBuiltinText(prompt) {
+  const edgeAi = getEdgeBuiltinAI();
+  if (!edgeAi || typeof edgeAi.createTextSession !== 'function') {
+    throw new Error('Edge built-in AI not available. Use a supported Edge build and enable AI APIs in edge://flags.');
+  }
+  const session = await edgeAi.createTextSession();
+  try {
+    const output = await session.prompt(String(prompt || ''));
+    if (typeof output === 'string') return output;
+    if (output?.text) return String(output.text);
+    return JSON.stringify(output || {});
+  } finally {
+    try { await session.destroy?.(); } catch (_) {}
+  }
 }
 
 async function callOpenAICompatible({ url, apiKey, model, prompt, temperature = 0.1, max_tokens = 600 }) {
@@ -2591,6 +2614,8 @@ const LLMGateway = {
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data?.error) throw new Error(data?.error?.message || ('Claude HTTP ' + response.status));
         text = data?.content?.[0]?.text || '';
+      } else if (useProvider === 'edge_builtin') {
+        text = await callEdgeBuiltinText(prompt);
       } else {
         throw new Error('Unknown provider: ' + useProvider);
       }
@@ -2639,6 +2664,10 @@ const LLMGateway = {
           body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] })
         });
         return { ok: response.ok };
+      }
+      if (provider === 'edge_builtin') {
+        const probe = await callEdgeBuiltinText('Reply with plain text: ok');
+        return { ok: !!probe, models: PROVIDER_MODELS.edge_builtin };
       }
       return { ok: false, error: 'Unknown provider' };
     } catch (error) {
@@ -4437,7 +4466,7 @@ async function updateApiMetrics({ provider, promptChars, outputChars }) {
   const stored = await chrome.storage.local.get([STORAGE_KEYS.API_METRICS]);
   const metrics = stored[STORAGE_KEYS.API_METRICS] || {
     calls: 0,
-    callsByProvider: { gemini: 0, ollama: 0 },
+    callsByProvider: { gemini: 0, ollama: 0, edge_builtin: 0 },
     hourly: [],
     estimatedCostUsd: 0,
     ollamaChars: 0
