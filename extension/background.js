@@ -2520,24 +2520,24 @@ function getProviderConfig(provider) {
   return configs[normalized] || configs.ollama;
 }
 
-function getEdgeBuiltinAI() {
-  return globalThis?.ai || null;
-}
+async function callEdgeBuiltinText(prompt, options = {}) {
+  const tabId = options.tabId || await getActiveTabId();
+  if (!tabId) {
+    throw new Error('Edge built-in AI requires an active browser tab.');
+  }
+  await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
+  const response = await chrome.tabs.sendMessage(tabId, {
+    action: 'EXECUTE',
+    command: {
+      action: 'edge_ai_prompt',
+      value: String(prompt || '')
+    }
+  }).catch(error => ({ success: false, error: error?.message || 'Edge AI call failed' }));
 
-async function callEdgeBuiltinText(prompt) {
-  const edgeAi = getEdgeBuiltinAI();
-  if (!edgeAi || typeof edgeAi.createTextSession !== 'function') {
-    throw new Error('Edge built-in AI not available. Use a supported Edge build and enable AI APIs in edge://flags.');
+  if (!response?.success) {
+    throw new Error(response?.error || 'Edge built-in AI is not available in this tab/session.');
   }
-  const session = await edgeAi.createTextSession();
-  try {
-    const output = await session.prompt(String(prompt || ''));
-    if (typeof output === 'string') return output;
-    if (output?.text) return String(output.text);
-    return JSON.stringify(output || {});
-  } finally {
-    try { await session.destroy?.(); } catch (_) {}
-  }
+  return String(response.result || '').trim();
 }
 
 async function callOpenAICompatible({ url, apiKey, model, prompt, temperature = 0.1, max_tokens = 600 }) {

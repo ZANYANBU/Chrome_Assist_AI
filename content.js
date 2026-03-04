@@ -611,6 +611,11 @@ if (!window.__ZANYSURF_agent_initialized) {
         return JSON.stringify(booking);
       }
 
+      case 'edge_ai_prompt': {
+        const output = await callEdgeBuiltinPrompt(String(value || ''));
+        return output;
+      }
+
       case 'execute_js': {
         const preset = String(command.preset || '').trim();
         const args = Array.isArray(command.args) ? command.args : [];
@@ -674,6 +679,22 @@ if (!window.__ZANYSURF_agent_initialized) {
     if (!match) return { success: false, message: 'No visible booking slots found' };
     match.node.click();
     return { success: true, selected: match.text };
+  }
+
+  async function callEdgeBuiltinPrompt(prompt) {
+    const edgeAi = window.ai;
+    if (!edgeAi || typeof edgeAi.createTextSession !== 'function') {
+      throw new Error('Edge built-in AI not available. Use a supported Edge build and enable AI APIs in edge://flags.');
+    }
+    const session = await edgeAi.createTextSession();
+    try {
+      const result = await session.prompt(String(prompt || ''));
+      if (typeof result === 'string') return result;
+      if (result?.text) return String(result.text);
+      return JSON.stringify(result || {});
+    } finally {
+      try { await session.destroy?.(); } catch (_) {}
+    }
   }
 
   function centerOf(node) {
