@@ -179,10 +179,40 @@
 
           <section id="view-memory" class="view">
             <div class="tabs">
-              <button class="tab is-active" data-memory-tab="memories">Memories</button>
+              <button class="tab is-active" data-memory-tab="short-term">Short-Term</button>
+              <button class="tab" data-memory-tab="long-term">Long-Term</button>
               <button class="tab" data-memory-tab="graph">Knowledge Graph</button>
             </div>
-            <div id="memory-memories" class="tab-panel is-active card"><div id="memory-summary" class="list"></div></div>
+
+            <!-- Short-Term: session memory with relevance / promotion indicators -->
+            <div id="memory-short-term" class="tab-panel is-active">
+              <div class="section-head with-actions" style="margin-bottom:6px">
+                <span id="st-heading" class="tile-title">Session Memory</span>
+                <button id="clear-short-term-btn" class="btn-ghost" style="font-size:11px">Clear</button>
+              </div>
+              <div id="memory-st-list" class="list"></div>
+              <!-- Legacy compat: memory-memories + memory-summary kept for dashboard -->
+              <div id="memory-memories" style="display:none"><div id="memory-summary"></div></div>
+            </div>
+
+            <!-- Long-Term: persistent memory with decay bars, search, stats -->
+            <div id="memory-long-term" class="tab-panel">
+              <div class="section-head with-actions" style="margin-bottom:6px">
+                <span id="lt-heading" class="tile-title">Persistent Memory</span>
+                <div class="inline-actions" style="gap:6px">
+                  <input id="memory-search-input" type="text" class="input" placeholder="Search memories…" style="width:120px;font-size:11px">
+                  <button id="memory-search-btn" class="btn-secondary">Search</button>
+                </div>
+              </div>
+              <div id="memory-stats-v2" class="card memory-stats-card"></div>
+              <div id="memory-lt-list" class="list"></div>
+              <div class="inline-actions" style="margin-top:10px;gap:8px">
+                <button id="clear-short-term-btn2" class="btn-ghost">Clear Short-Term</button>
+                <button id="clear-all-memory-btn" class="btn-ghost">Clear All Memory</button>
+              </div>
+            </div>
+
+            <!-- Knowledge Graph tab -->
             <div id="memory-graph" class="tab-panel card"><div id="knowledge-graph" class="list graph"></div></div>
           </section>
 

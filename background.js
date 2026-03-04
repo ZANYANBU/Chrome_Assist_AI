@@ -938,6 +938,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
   if (request.action === 'RUN_MULTI_AGENT') {
+    // When goals[] is provided → parallel async execution via AsyncTaskEngine
+    if (Array.isArray(request.goals) && request.goals.length > 0) {
+      const tasks = request.goals.map(g => ({
+        goal    : typeof g === 'string' ? g : (g.goal || ''),
+        priority: (typeof g === 'object' && g.priority) || 5,
+        dependsOn: (typeof g === 'object' && Array.isArray(g.dependsOn) ? g.dependsOn : []),
+        label   : (typeof g === 'object' && g.label) || String(typeof g === 'string' ? g : g.goal || '').slice(0, 40)
+      }));
+      asyncTaskEngine.enqueueMany(tasks);
+      sendResponse({ success: true, status: 'enqueued', count: tasks.length });
+      return true;
+    }
+    // Legacy / single-goal path → sequential runAgentEntry
     const runToken = startNewRun('run-multi-agent');
     runAgentEntry(request.prompt, { ...(request.options || {}), multiAgent: true, runToken });
     sendResponse({ status: 'started', runToken });
@@ -1251,6 +1264,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   if (request.action === 'GET_SHORT_TERM') {
     sendResponse({ success: true, memories: memorySystem.shortTerm });
+    return true;
+  }
+  if (request.action === 'SEARCH_MEMORY') {
+    const results = memorySystem.retrieve(request.query || '', { topK: Math.min(20, Number(request.topK) || 10) });
+    sendResponse({ success: true, results });
     return true;
   }
   if (request.action === 'GET_LONG_TERM') {

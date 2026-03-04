@@ -878,3 +878,27 @@ body.sidepanel-mode { width: 400px; height: 100vh; }
   transition: width .4s ease;
 }
 
+/* =============================================================================
+   MEMORY SYSTEM v2 PANEL STYLES
+   ============================================================================= */
+
+/* Memory entry cards (short-term + long-term) */
+.memory-entry-card {
+  padding: 9px 12px;
+  margin-bottom: 7px;
+  border-radius: 8px;
+  background: var(--surface2, #1e1e2e);
+  border: 1px solid var(--border, rgba(255,255,255,.08));
+  animation: slideIn .18s ease;
+}
+
+/* Stats card in long-term panel */
+.memory-stats-card {
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: var(--surface2, #1e1e2e);
+  border: 1px solid var(--border, rgba(255,255,255,.08));
+  font-size: 11px;
+}
+

@@ -120,6 +120,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initTier3Panel();
   initTier4Panel();
   initTier5Panel();
+  initMemoryV2Panel();
 
   // ── Settings panel events ───────────────────────────────────────
   settingsBtn.addEventListener('click', () => {
@@ -1517,6 +1518,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   function activateView(viewId) {
     navButtons.forEach(item => item.classList.toggle('is-active', item.dataset.view === viewId));
     views.forEach(view => view.classList.toggle('is-active', view.id === viewId));
+    if (viewId === 'view-memory') loadShortTermMemory();
   }
 
   function initTabs() {
@@ -1524,8 +1526,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       tab.addEventListener('click', () => {
         const target = tab.dataset.memoryTab;
         document.querySelectorAll('[data-memory-tab]').forEach(t => t.classList.toggle('is-active', t === tab));
-        $('memory-memories')?.classList.toggle('is-active', target === 'memories');
+        $('memory-short-term')?.classList.toggle('is-active', target === 'short-term');
+        $('memory-long-term')?.classList.toggle('is-active', target === 'long-term');
         $('memory-graph')?.classList.toggle('is-active', target === 'graph');
+        if (target === 'short-term') loadShortTermMemory();
+        if (target === 'long-term') loadLongTermMemory('');
       });
     });
 
@@ -1779,6 +1784,162 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function escHtml(str) {
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // ==========================================================================
+  // MEMORY SYSTEM v2 PANEL
+  // Short-Term (session), Long-Term (persistent) with decay bars & search
+  // ==========================================================================
+  function initMemoryV2Panel() {
+    const clearStBtn  = document.getElementById('clear-short-term-btn');
+    const clearStBtn2 = document.getElementById('clear-short-term-btn2');
+    const clearAllBtn = document.getElementById('clear-all-memory-btn');
+    const searchBtn   = document.getElementById('memory-search-btn');
+    const searchInput = document.getElementById('memory-search-input');
+
+    if (clearStBtn) {
+      clearStBtn.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ action: 'CLEAR_MEMORY_V2', scope: 'short' }, () => loadShortTermMemory());
+      });
+    }
+    if (clearStBtn2) {
+      clearStBtn2.addEventListener('click', () => {
+        chrome.runtime.sendMessage({ action: 'CLEAR_MEMORY_V2', scope: 'short' }, () => loadShortTermMemory());
+      });
+    }
+    if (clearAllBtn) {
+      clearAllBtn.addEventListener('click', () => {
+        if (!confirm('Clear ALL memory (short-term + long-term)? This cannot be undone.')) return;
+        chrome.runtime.sendMessage({ action: 'CLEAR_MEMORY_V2', scope: 'all' }, () => {
+          loadShortTermMemory();
+          loadLongTermMemory('');
+        });
+      });
+    }
+    if (searchBtn && searchInput) {
+      const doSearch = () => loadLongTermMemory(searchInput.value.trim());
+      searchBtn.addEventListener('click', doSearch);
+      searchInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+    }
+  }
+
+  // ── Short-Term: load and render ────────────────────────────────────────────
+  function loadShortTermMemory() {
+    chrome.runtime.sendMessage({ action: 'GET_SHORT_TERM' }, resp => {
+      renderShortTermList(resp?.memories || []);
+    });
+  }
+
+  function renderShortTermList(memories) {
+    const list    = document.getElementById('memory-st-list');
+    const heading = document.getElementById('st-heading');
+    if (!list) return;
+    if (heading) heading.textContent = 'Session Memory (' + memories.length + ' entries)';
+    if (!memories.length) {
+      list.innerHTML = '<p class="muted" style="padding:12px">No session memories yet. Complete a task to populate.</p>';
+      return;
+    }
+    list.innerHTML = memories.map(m => {
+      const ageStr  = relativeTime(m.timestamp);
+      const sites   = (m.sites || []).join(', ').substring(0, 45);
+      const accessCount = m.accessCount || 0;
+      const promoting   = accessCount >= 2 && !m.promoted;
+      return `
+        <div class="memory-entry-card card">
+          <div class="registry-header">
+            <span>\uD83E\uDDE0</span>
+            <span class="registry-goal">${escHtml(m.goal || '')}</span>
+            ${promoting ? '<span class="task-phase-badge" style="background:#1e3a2e;color:#a6e3a1">\u2197 promoting</span>' : ''}
+            ${m.promoted ? '<span class="task-phase-badge">promoted \u2713</span>' : ''}
+          </div>
+          <div class="registry-meta">
+            ${sites ? `<span>${escHtml(sites)}</span>` : ''}
+            <span>${ageStr}</span>
+            <span>accessed ${accessCount}\xd7</span>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  // ── Long-Term: load and render ─────────────────────────────────────────────
+  function loadLongTermMemory(query) {
+    if (query) {
+      chrome.runtime.sendMessage({ action: 'SEARCH_MEMORY', query, topK: 15 }, resp => {
+        chrome.runtime.sendMessage({ action: 'GET_MEMORY_STATS' }, statsResp => {
+          renderLongTermList(resp?.results || [], statsResp?.stats || null, true);
+        });
+      });
+    } else {
+      chrome.runtime.sendMessage({ action: 'GET_LONG_TERM' }, resp => {
+        chrome.runtime.sendMessage({ action: 'GET_MEMORY_STATS' }, statsResp => {
+          renderLongTermList(resp?.memories || [], statsResp?.stats || null, false);
+        });
+      });
+    }
+  }
+
+  function renderLongTermList(memories, stats, isSearchResult) {
+    const list    = document.getElementById('memory-lt-list');
+    const heading = document.getElementById('lt-heading');
+    const statsEl = document.getElementById('memory-stats-v2');
+    if (!list) return;
+
+    // Stats bar
+    if (statsEl && stats) {
+      const avgPct = Math.round((stats.avgDecayWeight || 0) * 100);
+      statsEl.innerHTML =
+        `<div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--text3,#6c7086)">
+           <span>\uD83D\uDDC3 ${stats.longTermCount || 0} active</span>
+           <span>\uD83D\uDD34 ${stats.decayedCount || 0} decayed</span>
+           <span>\u23F3 ${stats.shortTermCount || 0} session</span>
+           <span>avg decay: ${avgPct}%</span>
+         </div>
+         <div class="decay-bar-wrap" style="margin-top:5px">
+           <div class="decay-bar" style="width:${avgPct}%"></div>
+         </div>`;
+    }
+
+    const total = stats ? (stats.longTermCount || 0) : memories.length;
+    if (heading) heading.textContent = isSearchResult
+      ? 'Search Results (' + memories.length + ')'
+      : 'Persistent Memory (' + total + ' entries)';
+
+    if (!memories.length) {
+      list.innerHTML = isSearchResult
+        ? '<p class="muted" style="padding:12px">No matching memories found.</p>'
+        : '<p class="muted" style="padding:12px">No long-term memories yet.</p>';
+      return;
+    }
+
+    list.innerHTML = memories.slice(0, 50).map(m => {
+      const ageStr  = relativeTime(m.timestamp);
+      const sites   = (m.sites || []).join(', ').substring(0, 45);
+      const score   = m.score !== undefined ? m.score : null;
+      // decayPct: for search results use score, for raw entries approximate from timestamp
+      const decayPct = score !== null
+        ? Math.round(Math.min(100, Math.max(0, score * 100)))
+        : null;
+
+      return `
+        <div class="memory-entry-card card">
+          <div class="registry-header">
+            <span>\uD83D\uDD35</span>
+            <span class="registry-goal">${escHtml(m.goal || '')}</span>
+            ${score !== null ? `<span class="task-phase-badge" style="min-width:40px;text-align:center">${score}</span>` : ''}
+          </div>
+          <div class="registry-meta">
+            ${sites ? `<span>${escHtml(sites)}</span>` : ''}
+            <span>${ageStr}</span>
+            <span>accessed ${m.accessCount || 0}\xd7</span>
+            ${m.source ? `<span class="task-phase-badge">${escHtml(m.source)}</span>` : ''}
+          </div>
+          ${decayPct !== null ? `
+          <div style="font-size:10px;color:var(--text3,#6c7086);margin-top:4px">relevance: ${decayPct}%</div>
+          <div class="decay-bar-wrap">
+            <div class="decay-bar" style="width:${decayPct}%"></div>
+          </div>` : ''}
+        </div>`;
+    }).join('');
   }
 });
 
