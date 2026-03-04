@@ -1,426 +1,367 @@
-<div align="center">
+﻿<div align="center">
 
-# ZANYSURF AI Browser Agent
+# âœ¦ ZANYSURF â€” Autonomous AI Browser Agent
 
-### Enterprise-grade autonomous browser agent (Chrome MV3)
+### Give it a goal. It does the work.
 
-Run natural-language goals as auditable browser workflows with local or cloud LLMs, multi-agent orchestration, strict safety controls, and full operator visibility.
+ZANYSURF is a Chrome and Edge extension that turns any LLM into a fully autonomous web agent.<br>
+Type what you want in plain English. It plans, browses, clicks, fills forms, and reports back â€” showing every reasoning step.
 
 [![Manifest](https://img.shields.io/badge/Manifest-V3-2ea44f)](https://developer.chrome.com/docs/extensions/mv3/intro/)
-[![Platform](https://img.shields.io/badge/Platform-Chrome_Extension-4285F4)](https://developer.chrome.com/docs/extensions/)
+[![Chrome](https://img.shields.io/badge/Chrome-Extension-4285F4)](https://developer.chrome.com/docs/extensions/)
+[![Edge](https://img.shields.io/badge/Edge-Compatible-0078D4)](https://microsoftedge.microsoft.com/addons/)
 [![Version](https://img.shields.io/badge/Version-2.0.0-6f42c1)](manifest.json)
+[![Tests](https://img.shields.io/badge/Tests-15%2F15-brightgreen)]()
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
+
+â­ **If ZANYSURF saves you time, please star it!** â€” it makes a real difference for a 2nd-year student.
 
 </div>
 
 ---
 
+> **"Research the top 5 mechanical keyboards under $100 and write a comparison in Google Docs"**
+>
+> ZANYSURF opens Reddit, gathers recommendations, checks Amazon prices across 3 tabs, synthesizes the data, opens Google Docs, and writes the comparison. All while you watch.
+
+> ðŸ“¹ **Demo video coming soon** â€” [watch this space]
+
+**Runs 100% locally with Ollama. No servers. No subscriptions. Your data never leaves your browser.**
+
+| | ZANYSURF | Other Agents |
+|--|----------|--------------|
+| Runs locally | âœ… Ollama | âŒ Cloud only |
+| No server | âœ… | âŒ Sends your data |
+| Free forever | âœ… | âŒ Subscription |
+| LLM providers | âœ… 6 (Ollama/Gemini/OpenAI/Claude/Groq/Mistral) | âš  1â€“2 |
+| Encrypted vault | âœ… AES-GCM | âŒ None |
+| Plan-and-Execute | âœ… + Reflexion | âŒ Basic ReAct |
+| Multi-agent | âœ… Research/Analysis/Writer/Action | âŒ Single agent |
+| Open source | âœ… MIT | âŒ Closed |
+
+---
+
+## Quick Start
+
+**Option A â€” Free, local (recommended)**
+1. Download [Ollama](https://ollama.com) and run: `ollama pull llama3.2`
+2. Load the `extension/` folder in Chrome/Edge (developer mode, see Install below)
+3. Open the ZANYSURF side panel, select **Ollama**, type your goal, hit Enter
+
+**Option B â€” Cloud API (no Ollama needed)**
+1. Load the `extension/` folder in Chrome/Edge
+2. Settings â†’ choose provider (OpenAI / Claude / Gemini / Groq / Mistral) â†’ add API key
+3. Type your goal and go
+
+**Option C â€” Edge with built-in AI (zero setup)**
+1. Load the `extension/` folder in Edge
+2. Select **Edge Built-in AI** â€” no key needed (uses Phi-3 if available in your Edge build)
+
+---
+
 ## Table of Contents
 
-- [Executive Summary](#executive-summary)
-- [Reality Check](#reality-check)
-- [Capability Matrix](#capability-matrix)
+- [What is ZANYSURF?](#what-is-zanysurf)
+- [Quick Start](#quick-start)
+- [All Features](#all-features)
 - [System Architecture](#system-architecture)
+- [LLM Providers](#llm-providers)
+- [Edge Browser Support](#edge-browser-support)
+- [Privacy First](#privacy-first)
+- [Install (Chrome & Edge)](#install-chrome--edge)
+- [Configuration](#configuration)
+- [Permissions Explained](#permissions-explained)
 - [Detailed Runtime Workflows](#detailed-runtime-workflows)
-- [Feature Specification](#feature-specification)
-- [Provider and Model Support](#provider-and-model-support)
-- [Engineering Ownership Standard](#engineering-ownership-standard)
-- [Edge Port Strategy](#edge-port-strategy)
-- [Product Roadmap](#product-roadmap)
-- [Setup and Runbook](#setup-and-runbook)
-- [Security and Compliance](#security-and-compliance)
 - [Testing and Quality Assurance](#testing-and-quality-assurance)
 - [Repository Structure](#repository-structure)
-- [Operations and Release Workflow](#operations-and-release-workflow)
-- [Known Limits and Recovery](#known-limits-and-recovery)
-- [License](#license)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License & Credits](#license--credits)
 
 ---
 
-## Executive Summary
+## What is ZANYSURF?
 
-ZANYSURF is a production-grade autonomous browser agent implemented entirely in Chrome extension runtime (Manifest V3 service worker + content scripts). It accepts plain-English goals, plans and executes browser actions, adapts via looped observation, and exposes every major decision through a live operator UI.
+ZANYSURF is a production-grade autonomous browser agent implemented entirely inside the Chrome extension runtime (Manifest V3 service worker + content scripts). No proxy server, no backend, no subscription. It accepts plain-English goals, decomposes them into a plan, and executes browser actions step-by-step using a **Plan-and-Execute + Reflexion** loop â€” adapting when steps fail.
 
-### Primary outcomes
-- Local-first AI automation with Ollama support
-- Cloud provider flexibility (Gemini/OpenAI/Claude/Groq/Mistral)
-- Multi-agent research-to-analysis-to-writing pipeline
-- Strong governance via risk gates, approvals, audit logs, and encrypted vault
-- Deterministic run lifecycle with stale-run invalidation and cancel/restart safety
-
-### Current status
-- Release version: `2.0.0`
-- Test baseline: `15/15` unit tests passing
-- Store readiness: ready with final privacy-policy URL pending publication
+Unlike simple browser macros, ZANYSURF maintains **agent memory across sessions**, runs **multi-agent pipelines** for complex research tasks, and guards every high-risk action with a human-in-the-loop approval gate. Every reasoning step is surfaced live in the UI so you always know what it's doing and why.
 
 ---
 
-## Reality Check
+## All Features
 
-| What GitHub may show at a glance | What is actually built |
-|---|---|
-| Small visible commit window | Multi-month iteration across runtime, UI, safety, memory, and orchestration |
-| Basic README impression | Full production runbook + architecture + workflows |
-| Simple provider setup assumption | 7 providers including Edge built-in zero-key path |
-| No obvious release metadata | `v2.0.0` tagged release-ready codebase |
+### Core Agent
+- **ReAct loop** â€” perceive â†’ reason â†’ act â†’ observe â†’ repeat
+- **Plan-and-Execute** â€” generates a dependency graph of subtasks before acting
+- **Reflexion** â€” self-evaluates failures and replans automatically
+- **Vision mode** â€” DOM tree mapping with screenshot fallback
+- **Run lifecycle guards** â€” cancellation tokens invalidate stale runs instantly
+- **30-step limit** with auto-replanning on exhaustion
 
-This repository now reflects the real V2 platform state, not an early V1 snapshot.
+### LLM Providers (6 total)
+| Provider | Models | Cost | Best For |
+|---|---|---|---|
+| **Ollama** | Llama 3.2, Mistral, Phi-3 | Free | Privacy, offline |
+| **Gemini** | 1.5 Pro, 1.5 Flash | Free tier + paid | Long context |
+| **OpenAI** | GPT-4o, GPT-4o-mini | Pay per token | General purpose |
+| **Claude** | 3.5 Sonnet, Haiku | Pay per token | Complex reasoning |
+| **Groq** | Llama3, Mixtral | Free tier + paid | Ultra-fast inference |
+| **Mistral** | Large, 8x22B | Pay per token | Cost-efficient |
+| **Edge Built-in** | Phi-3 | Free (browser) | Zero-setup on Edge |
 
----
+### Memory & Intelligence
+- Short-term session context window
+- Long-term persistent memory with relevance scoring
+- Vector similarity retrieval (cosine)
+- 30-day memory decay mechanism
+- Knowledge graph with D3.js force visualization
 
-## Capability Matrix
+### Privacy & Security
+- AES-GCM encrypted credential vault (PBKDF2 key derivation)
+- No ZANYSURF servers â€” API calls go directly from your browser to the provider
+- Human-in-the-loop risk assessment gates
+- Safe mode for isolated, no-persist execution
 
-| Domain | Included |
-|---|---|
-| Agentic Loop | ReAct-style perceive/reason/act/observe/repeat |
-| Planning | Plan-and-execute with replanning on failure |
-| Multi-Agent | Research, Analysis, Writer, Action agents |
-| Browser Control | Navigate, click, type, select, key, scroll, form actions, tab orchestration |
-| Advanced Actions | drag/drop, upload, iframe enter/exit, context click, shortcuts |
-| Memory | Short-term context + long-term retrieval |
-| Knowledge | Entity graph extraction and retrieval |
-| Safety | Risk classification + human approval + safe mode |
-| Auditability | Event stream, action log export, replay support |
-| Scheduling | Alarm-backed recurring tasks |
-| Secrets | AES-GCM encrypted provider key/credential vault |
+### Automation
+- Task scheduler using Chrome Alarms API
+- Workflow recorder + one-click replay
+- Smart bookmarks with fuzzy natural language search
+
+### Browser Control
+- navigate, click, type, key, scroll, hover, select, wait
+- Tab operations: open, activate, wait, multi-tab orchestration with dependency graphs
+- Drag/drop, file upload, iframe enter/exit, context menu, keyboard shortcuts
+
+### Power Features
+- Multi-agent orchestration: Research / Analysis / Writer / Action agents
+- Web extraction + CSV export to clipboard
+- Form intelligence with CAPTCHA detection
+- Calendar and booking agent integration
+- In-extension self-test runner (`selftest.html`)
+- 15/15 unit tests passing
 
 ---
 
 ## System Architecture
 
-### Runtime components
+```
++â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€+   message   +â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€+   message   +â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€+
+â”‚  Popup / SidePanel â”‚ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€> â”‚  Service Worker     â”‚ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€> â”‚  Content Script  â”‚
+â”‚  (popup.js / html) â”‚ <â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ â”‚  (background.js)    â”‚ <â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ â”‚  (content.js)    â”‚
++â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€+             +â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€+             +â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€+
+                                           â”‚
+                     â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¼â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+                     â”‚                     â”‚                    â”‚
+              +â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€+    +â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€+    +â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€+
+              â”‚ LLMGateway  â”‚    â”‚   MemorySystem    â”‚    â”‚  AES Vault    â”‚
+              â”‚ 6 providers â”‚    â”‚  short+long+decay â”‚    â”‚  PBKDF2 keys  â”‚
+              +â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€+    +â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€+    +â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€+
+                                 +â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€+
+                                 â”‚              Chrome APIs                 â”‚
+                                 â”‚  scripting Â· storage Â· alarms Â· tabs     â”‚
+                                 +â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€+
+```
 
-- [background.js](background.js)
-  - Message router and orchestration core
-  - Planning engine + run lifecycle management
-  - Multi-agent coordinator
-  - Scheduler, memory, bookmarks, vault, metrics, audit
+---
 
-- [content.js](content.js)
-  - DOM perception and interaction executor
-  - Extraction and page-context synthesis
-  - Network/console signal capture hooks
-  - Preset-only `execute_js` mode (policy-safe)
+## LLM Providers
 
-- [popup.js](popup.js), [popup.html](popup.html), [popup.css](popup.css)
-  - Operator command center and side panel UX
-  - Live status, progress, step cards, plan updates, activity feed
-  - Provider/model setup and secure key workflows
+### Ollama (local â€” recommended for privacy)
+```bash
+# Install Ollama from https://ollama.com
+ollama pull llama3.2
+# In ZANYSURF settings: Provider = ollama, URL = http://localhost:11434
+```
 
-- [extension/](extension)
-  - Packaging/runtime mirror for unpacked extension load path
+### OpenAI
+Settings â†’ Provider â†’ `openai` â†’ paste API key from [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 
-### Core runtime flow
-1. UI submits `RUN_AGENT` or `RUN_MULTI_AGENT`
-2. Background starts tokenized run lifecycle
-3. Content returns page context and executes actions
-4. Background updates memory/state/logs and repeats loop
-5. Completion/error/cancel events are streamed to UI
+### Claude (Anthropic)
+Settings â†’ Provider â†’ `claude` â†’ paste API key from [console.anthropic.com](https://console.anthropic.com)
+
+### Gemini (Google)
+Settings â†’ Provider â†’ `gemini` â†’ paste API key from [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
+
+### Groq
+Settings â†’ Provider â†’ `groq` â†’ paste API key from [console.groq.com/keys](https://console.groq.com/keys)
+
+### Mistral
+Settings â†’ Provider â†’ `mistral` â†’ paste API key from [console.mistral.ai](https://console.mistral.ai)
+
+---
+
+## Edge Browser Support
+
+ZANYSURF works in Microsoft Edge â€” same `extension/` folder, no code changes needed.
+
+**Install on Edge:**
+1. Open `edge://extensions`
+2. Toggle **Developer mode** (bottom left)
+3. Click **Load unpacked** â†’ select the `extension/` folder
+
+**Edge Add-ons store:** Submission in progress. Link will appear here when live.
+
+**Edge Built-in AI:** ZANYSURF already includes an `edge_builtin` provider that routes to `window.ai` (Phi-3/Phi-4). When Microsoft ships this stably, Edge users get a zero-setup, free, offline inference path â€” no API key, no Ollama, nothing to install.
+
+---
+
+## Privacy First
+
+Your data is yours. Here is exactly where it goes:
+
+| Situation | Where your data goes |
+|---|---|
+| Ollama provider | Stays on your machine only |
+| Cloud provider (OpenAI, Claude, etc.) | Sent directly from your browser to the provider's API. ZANYSURF has no server in the middle. |
+| Credentials / API keys | AES-GCM encrypted vault. Never written in plaintext. |
+| Browsing actions / DOM content | Used only within your browser tab. Never sent to ZANYSURF. |
+| Analytics / telemetry | None. Not present in the codebase. |
+
+---
+
+## Install (Chrome & Edge)
+
+**Chrome:**
+1. Download and unzip the latest [Release](https://github.com/ZANYANBU/Chrome_Assist_AI/releases)
+2. Open `chrome://extensions`
+3. Enable **Developer mode** (top right toggle)
+4. Click **Load unpacked** â†’ select the `extension/` folder
+
+**Edge:**
+1. Download and unzip the latest [Release](https://github.com/ZANYANBU/Chrome_Assist_AI/releases)
+2. Open `edge://extensions`
+3. Enable **Developer mode** (bottom left toggle)
+4. Click **Load unpacked** â†’ select the `extension/` folder
+
+**From source:**
+```bash
+git clone https://github.com/ZANYANBU/Chrome_Assist_AI.git
+cd Chrome_Assist_AI
+npm install && npm run build
+# Then load the extension/ folder as above
+```
+
+---
+
+## Configuration
+
+Open the ZANYSURF side panel â†’ settings gear icon:
+
+| Setting | What it does |
+|---|---|
+| Provider | Select Ollama, Gemini, OpenAI, Claude, Groq, Mistral, or Edge Built-in |
+| Ollama URL | Change if Ollama runs on a non-default port (default: `http://localhost:11434`) |
+| API Key | Enter your cloud provider key (encrypted before storage) |
+| Safe Mode | Requires manual approval before any form submission or navigation |
+| Memory | Toggle short-term / long-term retention per session |
+
+---
+
+## Permissions Explained
+
+| Permission | Why it's needed |
+|---|---|
+| `activeTab` | Read and interact with the current page for DOM mapping and actions |
+| `scripting` | Inject content scripts to execute browser actions in the page context |
+| `storage` | Save memory, vault, settings, and bookmarks locally in your browser |
+| `alarms` | Power the task scheduler for recurring background goals |
+| `tabs` | Open and activate tabs during multi-tab orchestration |
+| `sidePanel` | Open ZANYSURF as a persistent side panel (Chrome/Edge MV3) |
+| Host permissions | Make LLM API calls directly to the provider (no ZANYSURF proxy) |
+
 
 ---
 
 ## Detailed Runtime Workflows
 
-### 1) Single-agent execution
+### Single-agent execution
+1. Goal arrives from popup `doSend` → `startNewRun()` creates exclusive run token
+2. `runAgentWithPlanning()` generates subtask plan
+3. `runAgentLoop()` repeatedly: resolve tab → gather context → LLM reason → safety gate → execute → persist → repeat
+4. Terminates on `done` / error / abort / max steps / stale token
 
-1. Goal arrives from popup (`doSend`)
-2. `startNewRun()` creates exclusive run token ownership
-3. `runAgentEntry()` validates and bootstraps session state
-4. `runAgentWithPlanning()` generates subtask plan
-5. `runAgentLoop()` repeatedly:
-   - resolves active tab + readiness
-   - gathers context (DOM/vision/history/memory)
-   - obtains next action from fast path or LLM
-   - applies safety/risk gates
-   - executes via content script
-   - persists result and emits telemetry
-6. Terminates on complete/error/abort/max steps/stale token
-
-### 2) Multi-agent orchestration
-
+### Multi-agent orchestration
 1. Goal decomposition via `OrchestratorAgent.decomposeGoal`
-2. DAG-like step graph created (dependencies respected)
-3. Independent steps run parallel; dependent steps sequential
-4. Agent bus events emitted for each transition/result
-5. Results synthesized into final operator-facing summary
+2. Dependency graph created — independent steps run in parallel, dependent steps sequential
+3. Agent bus events emitted for each transition
+4. Results synthesized into final summary
 
-### 3) Cancellation and restart semantics
+### Cancellation and restart
+- `activeRunToken` increments on every cancel/replace
+- Every loop iteration verifies token ownership (`isRunTokenCurrent`)
+- Stale loops exit before touching the browser — no zombie actions
 
-Run ownership is tokenized:
-- `activeRunToken` increments on cancellation/replacement
-- Loops and critical execution points verify ownership (`isRunTokenCurrent`)
-- Stale loops exit before further browser actions
-
-User experience when replacing a running goal:
-- Old run cancelled and cleared
-- Toast shown: `Old run cancelled`
-- New run starts immediately
-- Toast shown: `New run started`
-
-### 4) Scheduler workflow
-
-1. Goal + schedule captured via UI or parsed intent
-2. `SchedulerEngine.createTask` stores normalized task metadata
-3. Chrome alarm triggers run
-4. Runtime updates `lastRun` and computes `nextRun`
-
-### 5) Memory and knowledge workflow
-
-1. Action traces are recorded during run
-2. Retrieval computes relevant top-K memory context
-3. Extracted entities update graph store
-4. Future prompts incorporate memory and graph context
-
-### 6) Secret management workflow
-
-1. User enters provider key or credential
-2. User unlocks vault session with passphrase
-3. Data encrypted (AES-GCM) before storage
-4. Runtime resolves only provider-relevant key at call time
-
-### 7) Observability workflow
-
-UI consumes event stream:
-- `AGENT_STATUS`
-- `AGENT_THINKING`
-- `AGENT_LOG`
-- `AGENT_EXEC_RESULT`
-- `AGENT_PLAN` / `AGENT_PLAN_PROGRESS`
-- `AGENT_TREE`
-- `AGENT_BUS_EVENT`
-- `AGENT_COMPLETE` / `AGENT_ERROR`
-
----
-
-## Feature Specification
-
-### Agent intelligence
-- ReAct loop with adaptive fallback
-- Planning + replanning
-- Multi-agent decomposition and execution
-
-### Browser action coverage
-- Core: navigate/click/type/key/hover/select/scroll/wait
-- Tab ops: open/activate/wait/open_tabs
-- Forms: inspect/fill/login-assisted
-- Extraction/synthesis: structured parse + CSV/clipboard export
-- Advanced ops: drag_drop/upload/iframe/context menu/shortcuts
-
-### Reliability controls
-- Stale-run invalidation via token ownership
-- Explicit cancellation APIs (`STOP_AGENT`, `CANCEL_AND_CLEAR`, `CLEAR_MEMORY`)
-- Loop-stuck escape behavior and guarded completion checks
-
----
-
-## Provider and Model Support
-
-### Providers
-- Local: `ollama`
-- Local (Edge): `edge_builtin` (`phi-3-mini`, zero API key when available)
-- Cloud: `gemini`, `openai`, `claude`, `groq`, `mistral`
-
-### Model operations
-- Provider-specific model selectors
-- Ollama model auto-detection
-- Edge built-in model support with runtime availability check
-- Goal-based recommendation helper
-- Per-provider call/latency/success metrics in UI
-
----
-
-## Engineering Ownership Standard
-
-AI acceleration is a force multiplier, but ownership quality is measured by independent mastery of core internals.
-
-### Ownership checks for core systems
-- Can you rewrite `buildDomMap()` from scratch without generation help?
-- Can you explain and defend retrieval strategy choices (e.g., cosine similarity tradeoffs)?
-- Can you debug a failing run-loop step from logs and telemetry without external prompts?
-- Can you extend provider routing/safety flow confidently under time pressure?
-
-If any answer is no, treat that area as a priority for deliberate deepening (design notes, tests, and manual drills).
-
----
-
-## Edge Port Strategy
-
-Edge is Chromium-based, so extension parity is high. The strategic advantage is built-in AI availability on newer Edge builds.
-
-### What changes for Edge
-- Runtime provider added: `edge_builtin`
-- Model path: `phi-3-mini`
-- API key requirement: none
-- UX message: clear fallback when built-in AI is unavailable
-
-### Manifest note
-To avoid breaking Chrome packaging, keep Chrome manifest as primary and use Edge-specific manifest variant for Edge store packaging. See:
-- [manifest.edge.json](manifest.edge.json)
-- [extension/manifest.edge.json](extension/manifest.edge.json)
-
-### Edge distribution advantage
-- Chrome Web Store: one-time fee + slower review
-- Edge Add-ons: free submission + typically faster review
-- Firefox AMO: free submission
-
-One codebase can be packaged for three stores to increase reach.
-
----
-
-## Product Roadmap
-
-### Phase 1 — Ship and distribute (this week)
-- Push complete V2 repository state and tag releases
-- Keep README aligned with production feature reality
-- Publish release asset package and changelog
-- Submit Edge Add-ons first for fast, free validation
-
-### Phase 2 — First real users (month 1)
-- Launch in technical communities
-- Fix first real-user bug wave quickly
-- Add feedback channels (Discussions + landing page)
-- Track early retention and repeat-use signals
-
-### Phase 3 — Differentiation (months 2-3)
-- Mature Edge zero-setup mode as lead differentiator
-- Expand cross-browser support
-- Focus deeply on one killer use case for repeat value
-
-### Phase 4 — Sustainability (months 3-6)
-- Introduce freemium strategy
-- Expand workflow sharing and advanced memory features
-- Apply to startup/accelerator opportunities with real usage data
-
----
-
-## Setup and Runbook
-
-### Prerequisites
-- Node.js 20+
-- npm
-- Chrome (Developer Mode)
-
-### Install and build
-```bash
-npm install
-npm run build
-```
-
-### Load unpacked extension
-1. Open `chrome://extensions`
-2. Enable `Developer mode`
-3. Click `Load unpacked`
-4. Choose [extension/](extension)
-
-### Local model (Ollama)
-```bash
-ollama serve
-ollama pull llama3.2
-```
-
-UI settings:
-1. Provider = `ollama`
-2. URL = `http://localhost:11434`
-3. Select model
-4. Click `Test Connection`
-
-### Cloud model setup
-1. Choose provider in settings
-2. Enter API key
-3. Unlock vault session
-4. Select model
-5. Test connection
-
-Host endpoints are declared in [manifest.json](manifest.json).
-
----
-
-## Security and Compliance
-
-### Security controls
-- AES-GCM encrypted local vault for secrets
-- Risk-scored actions with approval gates
-- Safe mode isolated execution option
-- Policy-safe execution model (no arbitrary remote code execution)
-
-### Permissions and rationale
-See [PERMISSIONS.md](PERMISSIONS.md) for full matrix and store-ready justification.
+### Observability events streamed to UI
+`AGENT_STATUS` · `AGENT_THINKING` · `AGENT_LOG` · `AGENT_EXEC_RESULT` · `AGENT_PLAN` · `AGENT_PLAN_PROGRESS` · `AGENT_TREE` · `AGENT_BUS_EVENT` · `AGENT_COMPLETE` · `AGENT_ERROR`
 
 ---
 
 ## Testing and Quality Assurance
 
-### Unit tests
 ```bash
 npm test -- --runInBand
 ```
 
-### QA artifacts
-- [qa/static-validation-report.json](qa/static-validation-report.json)
-- [qa/performance-report.json](qa/performance-report.json)
-- [qa/integration-checklist.md](qa/integration-checklist.md)
-- [qa/store-readiness.md](qa/store-readiness.md)
+- **15/15** unit tests passing
+- QA reports: [qa/static-validation-report.json](qa/static-validation-report.json)
+- In-extension self-test runner: `selftest.html`
 
-### Latest benchmark highlights
+**Benchmark highlights:**
 - DOM mapping: ~8.89 ms
 - Memory retrieval: ~4.61 ms
-- Extension load sample: ~1.20 ms
+- Extension load: ~1.20 ms
 
 ---
 
 ## Repository Structure
 
-- [background.js](background.js) — orchestration core
-- [content.js](content.js) — browser execution layer
-- [popup.js](popup.js) — operator UX controller
-- [manifest.json](manifest.json) — extension runtime contract
-- [extension/](extension) — mirrored runtime package
-- [qa/](qa) — validation/test/report tooling
-- [store-readiness.md](store-readiness.md) — publish checklist summary
-- [screenshot-guide.md](screenshot-guide.md) — store capture runbook
-
----
-
-## Operations and Release Workflow
-
-### Development commands
-```bash
-npm run dev
-npm run build
-npm run preview
-npm run lint
-npm test -- --runInBand
+```
+Chrome_Assist_AI/
+├─ extension/           # Load this folder in Chrome/Edge
+│   ├─ background.js    # MV3 service worker: agent loop, LLM gateway, scheduler
+│   ├─ content.js       # Page context: DOM mapping, action execution, extraction
+│   ├─ popup.html       # Side panel UI
+│   ├─ popup.js         # UI logic, charts, config
+│   ├─ popup.css        # Dark theme (#050505 bg, #00ff88 accent)
+│   ├─ manifest.json    # MV3 manifest
+│   └─ icons/
+├─ src/
+│   ├─ agent/           # gateway.js, perception.js, reasoning.js
+│   └─ memory/          # rag.js
+├─ qa/                  # Test reports and integration checklists
+├─ docs/                # Privacy policy (GitHub Pages)
+├─ background.js        # Root mirror (keep in sync with extension/)
+├─ content.js           # Root mirror (keep in sync with extension/)
+└─ README.md
 ```
 
-### Git workflow
-```bash
-git status
-git add .
-git commit -m "<message>"
-git push origin <branch>
-```
-
-### Contributor requirement
-Keep root and [extension/](extension) runtime files synchronized for:
-- `background.js`
-- `content.js`
-- `popup.js`
-- `popup.html`
-- `popup.css`
-- `manifest.json`
+**Contributor requirement:** keep `background.js`, `content.js`, `popup.js`, `popup.html`, `popup.css`, and `manifest.json` synchronized between root and `extension/` on every commit.
 
 ---
 
-## Known Limits and Recovery
+## Roadmap
 
-- `chrome://` and restricted pages may block script injection
-- Provider/network failures are classified and surfaced to user
-- High-risk actions can be blocked by policy gate
-- Stuck-loop behavior attempts guided escape
-- Concurrent stale runs are terminated by token mismatch
+**Coming in V2.1:**
+- Native Edge `window.ai` / Phi-4 integration (zero-setup, offline, free)
+- Firefox port
+- Voice input for goals
+- Mobile browser support
 
 ---
 
-## License
+## Contributing
 
-MIT — see [LICENSE](LICENSE).
+1. Fork the repo
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Commit: `git commit -m 'feat: your feature'`
+4. Push and open a Pull Request
+
+---
+
+## License & Credits
+
+MIT License — see [LICENSE](LICENSE).
+
+Built by **Anbu Chelvan Valavan** — 2nd Year CSE Student.
+
+⭐ **Star this repo if you believe AI should stay on your machine.** ⭐
