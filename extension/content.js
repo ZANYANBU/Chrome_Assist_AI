@@ -8,6 +8,8 @@ if (!window.__ZANYSURF_agent_initialized) {
   window.__ZANYSURF_agent_initialized = true;
 
   let elementMap = [];
+  let isRecordingMacro = false;
+
   let currentIframe = null;
   const networkBuffer = [];
   let networkHookInstalled = false;
@@ -34,16 +36,69 @@ if (!window.__ZANYSURF_agent_initialized) {
     }
   };
 
+  async function waitForDomStable(timeout = 3000) {
+    return new Promise((resolve) => {
+      let lastCount = 0;
+      let stableFor = 0;
+      const interval = setInterval(() => {
+        const count = document.querySelectorAll('a,button,input').length;
+        if (count === lastCount) {
+          stableFor += 200;
+          if (stableFor >= 600) { // stable for 600ms = ready
+            clearInterval(interval);
+            resolve();
+          }
+        } else {
+          stableFor = 0;
+          lastCount = count;
+        }
+      }, 200);
+      setTimeout(() => { clearInterval(interval); resolve(); }, timeout);
+    });
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function waitForDomChange(timeout = 2000) {
+    return new Promise((resolve) => {
+      const observer = new MutationObserver((mutations) => {
+        const significant = mutations.some(m => 
+          m.addedNodes.length > 3 || m.removedNodes.length > 3
+        );
+        if (significant) {
+          observer.disconnect();
+          resolve(true);
+        }
+      });
+      observer.observe(document.body, { 
+        childList: true, 
+        subtree: true 
+      });
+      setTimeout(() => { observer.disconnect(); resolve(false); }, timeout);
+    });
+  }
+
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        if (request.action === 'SET_MACRO_RECORDING') {
+      isRecordingMacro = request.state;
+      sendResponse({ success: true });
+      return true;
+    }
     if (request.action === 'GET_DOM') {
-      buildDomMap(request.options || {})
+      waitForDomStable().then(() => {
+        return buildDomMap(request.options || {});
+      })
         .then(result => sendResponse({ dom: result.domString, title: document.title, url: window.location.href, meta: result.meta || {} }))
         .catch(() => sendResponse({ dom: '', title: document.title, url: window.location.href, meta: {} }));
       return true;
     }
     if (request.action === 'EXECUTE') {
       executeAction(request.command)
-        .then(result => sendResponse({ success: true, result }))
+        .then(async (result) => {
+          const changed = await waitForDomChange();
+          if (changed) await sleep(400); // let React finish re-rendering
+          sendResponse({ success: true, result });
+        })
         .catch(err   => sendResponse({ success: false, error: err.message }));
       return true;
     }
@@ -149,23 +204,46 @@ if (!window.__ZANYSURF_agent_initialized) {
 
     const seen     = new Set();
     const root = currentIframe?.contentDocument || document;
-    const elements = [...root.querySelectorAll(selectors.join(',')), ...root.querySelectorAll('iframe')];
 
-    // Shadow DOM traversal (up to depth 4)
-    function collectShadow(root, depth) {
-      if (depth > 4) return;
-      try {
-        root.querySelectorAll('*').forEach(el => {
-          if (el.shadowRoot) {
-            collectShadow(el.shadowRoot, depth + 1);
-            try {
-              el.shadowRoot.querySelectorAll(selectors.join(',')).forEach(s => elements.push(s));
-            } catch (_) {}
-          }
-        });
-      } catch (_) {}
+    function collectAllElements(rootNode, depth = 0) {
+      if (depth > 6) return []; // increased from 4 to 6
+      
+      const elements = [];
+      const walker = document.createTreeWalker(
+        rootNode,
+        NodeFilter.SHOW_ELEMENT,
+        null
+      );
+      
+      let node;
+      while (node = walker.nextNode()) {
+        if (node.matches && node.matches(selectors.join(','))) {
+          elements.push(node);
+        } else if (node.tagName === 'IFRAME') {
+          elements.push(node);
+        }
+        
+        // Pierce shadow roots
+        if (node.shadowRoot) {
+          elements.push(...collectAllElements(node.shadowRoot, depth + 1));
+        }
+        // Also check open iframes (same origin only)
+        if (node.tagName === 'IFRAME') {
+          try {
+            if (node.contentDocument) {
+              elements.push(...collectAllElements(node.contentDocument.body, depth + 1));
+            }
+          } catch(e) {} // cross-origin iframes will throw, ignore
+        }
+      }
+      return elements;
     }
-    collectShadow(document, 0);
+    
+    // Get the root itself if it matches (tree walker doesn't always yield root)
+    let elements = collectAllElements(root, 0);
+    if (root.matches && root.matches(selectors.join(','))) {
+      elements.unshift(root);
+    }
 
     const measured = [];
     const scanLimit = Math.min(elements.length, Math.max(maxElements * 2, 220));
@@ -180,15 +258,45 @@ if (!window.__ZANYSURF_agent_initialized) {
     const belowFold = [];
     for (const item of measured) {
       if (!isInteractableRect(item.rect)) continue;
-      const inViewport = item.rect.bottom > 0 && item.rect.top < window.innerHeight;
+      const inViewport = item.rect.bottom > -200 && item.rect.top < window.innerHeight + (window.innerHeight * 2);
       if (inViewport) viewport.push(item);
       else belowFold.push(item);
     }
 
     const ordered = viewport.concat(belowFold);
     const selected = ordered.slice(0, maxElements);
-    const serialized = selected.map(item => serializeElementForDescription(item.el));
-    const descriptionLines = await buildDescriptionLines(serialized, elements.length);
+    
+    function describeElement(el) {
+      const tag = String(el.tagName || '').toLowerCase();
+      
+      const text = (
+        el.getAttribute?.('aria-label') ||
+        el.getAttribute?.('title') ||
+        el.getAttribute?.('placeholder') ||
+        el.getAttribute?.('alt') ||
+        el.getAttribute?.('name') ||
+        el.getAttribute?.('data-testid') ||
+        el.innerText?.trim() ||
+        el.textContent?.trim() ||
+        el.value ||
+        ''
+      ).slice(0, 80);
+      
+      const role = el.getAttribute?.('role') || '';
+      const type = el.getAttribute?.('type') || '';
+      let href = '';
+      try {
+        if (el.href) href = ` → ${new URL(el.href).pathname}`;
+      } catch(e) {}
+      
+      const nearbyHeading = el.closest?.('section, article, nav, header, main')
+        ?.querySelector('h1,h2,h3')?.innerText?.slice(0, 30) || '';
+      const context = nearbyHeading ? ` [in: ${nearbyHeading}]` : '';
+      
+      return `[${tag}${type ? ':'+type : ''}${role ? ' role='+role : ''}] "${text}"${href}${context}`;
+    }
+
+    const descriptionLines = selected.map(item => describeElement(item.el));
 
     selected.forEach((item, index) => {
       const rect = item.rect;
@@ -1056,4 +1164,7 @@ if (!window.__ZANYSURF_agent_initialized) {
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 }
+
+
+
 

@@ -224,11 +224,32 @@
             <div id="scheduled-list" class="list card"></div>
           </section>
 
-          <section id="view-workflows" class="view">
+                    <section id="view-workflows" class="view">
             <div class="section-head with-actions">
-              <h3>Workflows</h3>
-              <button class="btn-secondary" id="workflow-refresh-alt">Refresh</button>
+              <h3>Workflows &amp; Macros</h3>
+              <div class="inline-actions">
+                <button class="btn-secondary" id="start-macro-record-btn">? Record</button>
+                <button class="btn-secondary" id="stop-macro-record-btn" style="display:none; color: red;">? Stop</button>
+                <button class="btn-secondary" id="import-workflow-btn">?? Import</button>
+                <button class="btn-secondary" id="workflow-refresh-alt">?</button>
+              </div>
             </div>
+
+            <div class="recipes-library card" style="margin-bottom: 12px; background: #fafafa; padding: 10px; border-radius: 6px;">
+              <h4 style="margin: 0 0 8px 0; font-size: 12px;">Community Recipes</h4>
+              <div class="recipe-chips" style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="provider-chip recipe-btn" data-recipe="linkedin">LinkedIn Outreach</button>
+                <button class="provider-chip recipe-btn" data-recipe="amazon">Amazon Price Track</button>
+                <button class="provider-chip recipe-btn" data-recipe="github">GitHub Triage</button>
+              </div>
+            </div>
+
+            <div class="card" style="margin-bottom: 12px; background: #fafafa; padding: 10px; border-radius: 6px;">
+              <h4 style="margin: 0 0 4px 0; font-size: 12px;">Developer REST API</h4>
+              <p style="margin: 0; font-size: 11px; color: #666;">Integrate with your apps via Chrome Messaging.</p>
+              <pre style="margin: 4px 0 0 0; padding: 4px; background: #eee; font-size: 9px; overflow-x: auto;">chrome.runtime.sendMessage(EXT_ID, { action: 'RUN_AGENT', goal: 'Summarize page' });</pre>
+            </div>
+
             <div id="workflows-list" class="list card"></div>
           </section>
 
@@ -341,3 +362,4 @@
   <script src="popup.js"></script>
 </body>
 </html>
+

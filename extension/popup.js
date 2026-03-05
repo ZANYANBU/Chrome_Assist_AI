@@ -779,15 +779,72 @@ document.addEventListener('DOMContentLoaded', async () => {
         const replayResponse = await chrome.runtime.sendMessage({ action: 'REPLAY_WORKFLOW', workflowId: workflow.id })
           .catch(() => ({ success: false, error: 'Failed to replay workflow.' }));
         if (!replayResponse?.success) {
-          appendCard('error', '⚠ Replay failed', replayResponse?.error || 'Unable to replay workflow.');
+          appendCard('error', 'Replay failed', replayResponse?.error || 'Unable to replay workflow.');
           return;
         }
-        appendCard('system', '📼 Workflow replayed', workflow.goal || 'Workflow replay complete.');
+        appendCard('system', 'Workflow replayed', workflow.goal || 'Workflow replay complete.');
+        startMacroBtn?.addEventListener('click', () => {
+        const goal = window.prompt('Enter a name for this Macro:', 'My Macro');
+        if (!goal) return;
+        chrome.runtime.sendMessage({ action: 'START_MACRO', goal });
+        startMacroBtn.style.display = 'none';
+        stopMacroBtn.style.display = 'inline-block';
+        appendCard('system', '? Recording Macro', 'Interact with the page to record clicks and typing.');
+      });
+
+      stopMacroBtn?.addEventListener('click', async () => {
+        const res = await chrome.runtime.sendMessage({ action: 'STOP_MACRO' });
+        stopMacroBtn.style.display = 'none';
+        startMacroBtn.style.display = 'inline-block';
+        appendCard('system', '? Macro Saved', res?.workflow?.goal || 'Saved');
         renderWorkflows();
       });
-      actions.appendChild(replayBtn);
-      item.appendChild(actions);
 
+      importWorkflowBtn?.addEventListener('click', async () => {
+        const json = window.prompt('Paste workflow JSON here:');
+        if (!json) return;
+        try {
+          const wf = JSON.parse(json);
+          const stored = await chrome.storage.local.get(['zanysurf_workflows']);      
+          const workflows = stored.zanysurf_workflows || [];
+          workflows.unshift(wf);
+          await chrome.storage.local.set({ zanysurf_workflows: workflows });
+          renderWorkflows();
+          appendCard('system', '?? Imported', 'Workflow imported successfully.');
+        } catch(err) {
+          alert('Invalid JSON');
+        }
+      });
+      
+      recipeBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const type = btn.dataset.recipe;
+          let goal = '';
+          if (type === 'linkedin') goal = 'Find the latest connection request and send a polite greeting message.';
+          if (type === 'amazon') goal = 'Check the price of this item and extract it. If it is under , add to cart.';
+          if (type === 'github') goal = 'Look at the open issues on this repository, find the first bug, and summarize it.';
+          if (type === 'gmail') goal = 'Open Gmail, read the latest unread email, and generate a brief summary.';
+          chrome.runtime.sendMessage({ action: 'RUN_PROMPT', prompt: goal, options: { silent: false, trigger: 'recipe' } });
+          appendCard('user', goal);
+          appendCard('system', '?? Recipe Started', 'Running community recipe: ' + type);
+        });
+      });
+
+      renderWorkflows();
+      });
+      actions.appendChild(replayBtn);
+
+      const exportBtn = document.createElement('button');
+      exportBtn.className = 'btn-sec';
+      exportBtn.textContent = 'Export';
+      exportBtn.addEventListener('click', () => {
+         const json = JSON.stringify(workflow, null, 2);
+         navigator.clipboard.writeText(json).catch(()=>{});
+         alert('Workflow JSON copied to clipboard!');
+      });
+      actions.appendChild(exportBtn);
+
+      item.appendChild(actions);
       workflowsList.appendChild(item);
     });
   }
@@ -798,6 +855,193 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (!response?.success) {
       appendCard('error', '⚠ Workflow fetch failed', response?.error || 'Unable to fetch workflows.');
+      startMacroBtn?.addEventListener('click', () => {
+        const goal = window.prompt('Enter a name for this Macro:', 'My Macro');
+        if (!goal) return;
+        chrome.runtime.sendMessage({ action: 'START_MACRO', goal });
+        startMacroBtn.style.display = 'none';
+        stopMacroBtn.style.display = 'inline-block';
+        appendCard('system', '? Recording Macro', 'Interact with the page to record clicks and typing.');
+      });
+
+      stopMacroBtn?.addEventListener('click', async () => {
+        const res = await chrome.runtime.sendMessage({ action: 'STOP_MACRO' });
+        stopMacroBtn.style.display = 'none';
+        startMacroBtn.style.display = 'inline-block';
+        appendCard('system', '? Macro Saved', res?.workflow?.goal || 'Saved');
+        startMacroBtn?.addEventListener('click', () => {
+        const goal = window.prompt('Enter a name for this Macro:', 'My Macro');
+        if (!goal) return;
+        chrome.runtime.sendMessage({ action: 'START_MACRO', goal });
+        startMacroBtn.style.display = 'none';
+        stopMacroBtn.style.display = 'inline-block';
+        appendCard('system', '? Recording Macro', 'Interact with the page to record clicks and typing.');
+      });
+
+      stopMacroBtn?.addEventListener('click', async () => {
+        const res = await chrome.runtime.sendMessage({ action: 'STOP_MACRO' });
+        stopMacroBtn.style.display = 'none';
+        startMacroBtn.style.display = 'inline-block';
+        appendCard('system', '? Macro Saved', res?.workflow?.goal || 'Saved');
+        renderWorkflows();
+      });
+
+      importWorkflowBtn?.addEventListener('click', async () => {
+        const json = window.prompt('Paste workflow JSON here:');
+        if (!json) return;
+        try {
+          const wf = JSON.parse(json);
+          const stored = await chrome.storage.local.get(['zanysurf_workflows']);      
+          const workflows = stored.zanysurf_workflows || [];
+          workflows.unshift(wf);
+          await chrome.storage.local.set({ zanysurf_workflows: workflows });
+          renderWorkflows();
+          appendCard('system', '?? Imported', 'Workflow imported successfully.');
+        } catch(err) {
+          alert('Invalid JSON');
+        }
+      });
+      
+      recipeBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const type = btn.dataset.recipe;
+          let goal = '';
+          if (type === 'linkedin') goal = 'Find the latest connection request and send a polite greeting message.';
+          if (type === 'amazon') goal = 'Check the price of this item and extract it. If it is under , add to cart.';
+          if (type === 'github') goal = 'Look at the open issues on this repository, find the first bug, and summarize it.';
+          if (type === 'gmail') goal = 'Open Gmail, read the latest unread email, and generate a brief summary.';
+          chrome.runtime.sendMessage({ action: 'RUN_PROMPT', prompt: goal, options: { silent: false, trigger: 'recipe' } });
+          appendCard('user', goal);
+          appendCard('system', '?? Recipe Started', 'Running community recipe: ' + type);
+        });
+      });
+
+      renderWorkflows();
+      });
+
+      importWorkflowBtn?.addEventListener('click', async () => {
+        const json = window.prompt('Paste workflow JSON here:');
+        if (!json) return;
+        try {
+          const wf = JSON.parse(json);
+          const stored = await chrome.storage.local.get(['zanysurf_workflows']);      
+          const workflows = stored.zanysurf_workflows || [];
+          workflows.unshift(wf);
+          await chrome.storage.local.set({ zanysurf_workflows: workflows });
+          startMacroBtn?.addEventListener('click', () => {
+        const goal = window.prompt('Enter a name for this Macro:', 'My Macro');
+        if (!goal) return;
+        chrome.runtime.sendMessage({ action: 'START_MACRO', goal });
+        startMacroBtn.style.display = 'none';
+        stopMacroBtn.style.display = 'inline-block';
+        appendCard('system', '? Recording Macro', 'Interact with the page to record clicks and typing.');
+      });
+
+      stopMacroBtn?.addEventListener('click', async () => {
+        const res = await chrome.runtime.sendMessage({ action: 'STOP_MACRO' });
+        stopMacroBtn.style.display = 'none';
+        startMacroBtn.style.display = 'inline-block';
+        appendCard('system', '? Macro Saved', res?.workflow?.goal || 'Saved');
+        renderWorkflows();
+      });
+
+      importWorkflowBtn?.addEventListener('click', async () => {
+        const json = window.prompt('Paste workflow JSON here:');
+        if (!json) return;
+        try {
+          const wf = JSON.parse(json);
+          const stored = await chrome.storage.local.get(['zanysurf_workflows']);      
+          const workflows = stored.zanysurf_workflows || [];
+          workflows.unshift(wf);
+          await chrome.storage.local.set({ zanysurf_workflows: workflows });
+          renderWorkflows();
+          appendCard('system', '?? Imported', 'Workflow imported successfully.');
+        } catch(err) {
+          alert('Invalid JSON');
+        }
+      });
+      
+      recipeBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const type = btn.dataset.recipe;
+          let goal = '';
+          if (type === 'linkedin') goal = 'Find the latest connection request and send a polite greeting message.';
+          if (type === 'amazon') goal = 'Check the price of this item and extract it. If it is under , add to cart.';
+          if (type === 'github') goal = 'Look at the open issues on this repository, find the first bug, and summarize it.';
+          if (type === 'gmail') goal = 'Open Gmail, read the latest unread email, and generate a brief summary.';
+          chrome.runtime.sendMessage({ action: 'RUN_PROMPT', prompt: goal, options: { silent: false, trigger: 'recipe' } });
+          appendCard('user', goal);
+          appendCard('system', '?? Recipe Started', 'Running community recipe: ' + type);
+        });
+      });
+
+      renderWorkflows();
+          appendCard('system', '?? Imported', 'Workflow imported successfully.');
+        } catch(err) {
+          alert('Invalid JSON');
+        }
+      });
+      
+      recipeBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const type = btn.dataset.recipe;
+          let goal = '';
+          if (type === 'linkedin') goal = 'Find the latest connection request and send a polite greeting message.';
+          if (type === 'amazon') goal = 'Check the price of this item and extract it. If it is under , add to cart.';
+          if (type === 'github') goal = 'Look at the open issues on this repository, find the first bug, and summarize it.';
+          if (type === 'gmail') goal = 'Open Gmail, read the latest unread email, and generate a brief summary.';
+          chrome.runtime.sendMessage({ action: 'RUN_PROMPT', prompt: goal, options: { silent: false, trigger: 'recipe' } });
+          appendCard('user', goal);
+          appendCard('system', '?? Recipe Started', 'Running community recipe: ' + type);
+        });
+      });
+      startMacroBtn?.addEventListener('click', () => {
+        const goal = window.prompt('Enter a name for this Macro:', 'My Macro');
+        if (!goal) return;
+        chrome.runtime.sendMessage({ action: 'START_MACRO', goal });
+        startMacroBtn.style.display = 'none';
+        stopMacroBtn.style.display = 'inline-block';
+        appendCard('system', '? Recording Macro', 'Interact with the page to record clicks and typing.');
+      });
+
+      stopMacroBtn?.addEventListener('click', async () => {
+        const res = await chrome.runtime.sendMessage({ action: 'STOP_MACRO' });
+        stopMacroBtn.style.display = 'none';
+        startMacroBtn.style.display = 'inline-block';
+        appendCard('system', '? Macro Saved', res?.workflow?.goal || 'Saved');
+        renderWorkflows();
+      });
+
+      importWorkflowBtn?.addEventListener('click', async () => {
+        const json = window.prompt('Paste workflow JSON here:');
+        if (!json) return;
+        try {
+          const wf = JSON.parse(json);
+          const stored = await chrome.storage.local.get(['zanysurf_workflows']);      
+          const workflows = stored.zanysurf_workflows || [];
+          workflows.unshift(wf);
+          await chrome.storage.local.set({ zanysurf_workflows: workflows });
+          renderWorkflows();
+          appendCard('system', '?? Imported', 'Workflow imported successfully.');
+        } catch(err) {
+          alert('Invalid JSON');
+        }
+      });
+      
+      recipeBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const type = btn.dataset.recipe;
+          let goal = '';
+          if (type === 'linkedin') goal = 'Find the latest connection request and send a polite greeting message.';
+          if (type === 'amazon') goal = 'Check the price of this item and extract it. If it is under , add to cart.';
+          if (type === 'github') goal = 'Look at the open issues on this repository, find the first bug, and summarize it.';
+          if (type === 'gmail') goal = 'Open Gmail, read the latest unread email, and generate a brief summary.';
+          chrome.runtime.sendMessage({ action: 'RUN_PROMPT', prompt: goal, options: { silent: false, trigger: 'recipe' } });
+          appendCard('user', goal);
+          appendCard('system', '?? Recipe Started', 'Running community recipe: ' + type);
+        });
+      });
+
       renderWorkflows();
       return;
     }
@@ -1950,4 +2194,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }).join('');
   }
 });
+
+
+
+
 

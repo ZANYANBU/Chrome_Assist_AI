@@ -28,6 +28,34 @@ let tabOrchestrationState = {
   lastSynthesis: ''
 };
 const pendingApprovals = new Map();
+let macroRecording = {
+  active: false,
+  steps: [],
+  goal: ''
+};
+
+chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => {
+  if (request.action === 'RUN_AGENT') {
+    const goal = request.goal || request.prompt;
+    if (!goal) {
+       sendResponse({ success: false, error: 'Missing goal.' });
+       return;
+    }
+    runPrompt(goal, { silent: true, trigger: 'api' })
+      .then(result => sendResponse({ success: true, result }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  if (request.action === 'REPLAY_WORKFLOW') {
+     replayWorkflow(request.workflowId)
+        .then(result => sendResponse({ success: true, result }))
+        .catch(err => sendResponse({ success: false, error: err.message }));
+     return true;
+  }
+  if (request.action === 'GET_STATUS') {
+     sendResponse({ success: true, active: agentActive, goal: sessionGoal });
+  }
+});
 let activeRunContext = { silent: false, trigger: 'manual' };
 let currentAgentTree = [];
 let currentAgentRunId = null;
@@ -4207,10 +4235,25 @@ async function getDomContext(tabId, isSystemPage = false) {
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
     await sleep(350);
-    const response = await chrome.tabs.sendMessage(tabId, {
+    let response = await chrome.tabs.sendMessage(tabId, {
       action: 'GET_DOM',
       options: { lazyLoad: true }
     });
+
+    let domElements = response?.dom ? response.dom.split('\n').filter(Boolean) : [];
+    if (domElements.length < 5) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => window.scrollBy(0, 500)
+      });
+      await sleep(800);
+      // retry DOM mapping
+      response = await chrome.tabs.sendMessage(tabId, {
+        action: 'GET_DOM',
+        options: { lazyLoad: true }
+      });
+    }
+
     return {
       domMap: (response && response.dom) ? response.dom : 'EMPTY',
       title: response?.title || '',
@@ -5706,4 +5749,6 @@ async function waitForTabReady(tabId) {
     });
   });
 }
+
+
 
