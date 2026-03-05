@@ -38,22 +38,64 @@ if (!window.__ZANYSURF_agent_initialized) {
 
   async function waitForDomStable(timeout = 3000) {
     return new Promise((resolve) => {
-      let lastCount = 0;
+      let settled = false;
+      let mutationCount = 0;
+      let lastMutationCount = -1;
       let stableFor = 0;
+      const STABLE_THRESHOLD = 400; // ms with no significant mutations
+      const CHECK_INTERVAL = 100;
+
+      // MutationObserver — counts meaningful DOM changes
+      const observer = new MutationObserver((mutations) => {
+        const significant = mutations.some(m =>
+          m.addedNodes.length > 0 || m.removedNodes.length > 0
+        );
+        if (significant) mutationCount++;
+      });
+      try {
+        observer.observe(document.body || document.documentElement, {
+          childList: true,
+          subtree: true,
+          attributes: false
+        });
+        // Also observe shadow roots (one level deep) for React portals
+        document.querySelectorAll('*').forEach(el => {
+          if (el.shadowRoot) {
+            try {
+              observer.observe(el.shadowRoot, { childList: true, subtree: true });
+            } catch (_) {}
+          }
+        });
+      } catch (_) {}
+
       const interval = setInterval(() => {
-        const count = document.querySelectorAll('a,button,input').length;
-        if (count === lastCount) {
-          stableFor += 200;
-          if (stableFor >= 600) { // stable for 600ms = ready
-            clearInterval(interval);
-            resolve();
+        if (settled) return;
+        if (mutationCount === lastMutationCount) {
+          stableFor += CHECK_INTERVAL;
+          if (stableFor >= STABLE_THRESHOLD) {
+            // Extra check: React fiber root not still rendering
+            const reactBusy = !!(window.__reactFiber || window._reactRootContainer)?.__isBusy;
+            if (!reactBusy) {
+              settled = true;
+              clearInterval(interval);
+              observer.disconnect();
+              resolve();
+            }
           }
         } else {
           stableFor = 0;
-          lastCount = count;
+          lastMutationCount = mutationCount;
         }
-      }, 200);
-      setTimeout(() => { clearInterval(interval); resolve(); }, timeout);
+      }, CHECK_INTERVAL);
+
+      setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          clearInterval(interval);
+          observer.disconnect();
+          resolve();
+        }
+      }, timeout);
     });
   }
 
@@ -79,65 +121,101 @@ if (!window.__ZANYSURF_agent_initialized) {
   }
 
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        if (request.action === 'SET_MACRO_RECORDING') {
-      isRecordingMacro = request.state;
-      sendResponse({ success: true });
-      return true;
-    }
-    if (request.action === 'GET_DOM') {
-      waitForDomStable().then(() => {
-        return buildDomMap(request.options || {});
-      })
-        .then(result => sendResponse({ dom: result.domString, title: document.title, url: window.location.href, meta: result.meta || {} }))
-        .catch(() => sendResponse({ dom: '', title: document.title, url: window.location.href, meta: {} }));
-      return true;
-    }
-    if (request.action === 'EXECUTE') {
-      executeAction(request.command)
-        .then(async (result) => {
-          const changed = await waitForDomChange();
-          if (changed) await sleep(400); // let React finish re-rendering
-          sendResponse({ success: true, result });
-        })
-        .catch(err   => sendResponse({ success: false, error: err.message }));
-      return true;
-    }
-    if (request.action === 'READ_PAGE') {
-      try {
-        const text = (document.body?.innerText || '')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .substring(0, 12000);
-        sendResponse({
-          text,
-          title: document.title,
-          url: window.location.href,
-          semantic: analyzePageSemantics(),
-          media: extractMediaContext(),
-          readingMode: extractCleanArticleText()
-        });
-      } catch (_) {
-        sendResponse({ text: '', title: document.title, url: window.location.href });
-      }
-      return true;
-    }
-    if (request.action === 'INSTALL_NETWORK_MONITOR') {
-      try {
-        installNetworkHooks();
+    // Stability: top-level try/catch so one bad handler never crashes the rest
+    try {
+      if (request.action === 'SET_MACRO_RECORDING') {
+        isRecordingMacro = request.state;
         sendResponse({ success: true });
-      } catch (error) {
-        sendResponse({ success: false, error: error.message });
+        return true;
       }
-      return true;
-    }
-    if (request.action === 'READ_NETWORK_CACHE') {
-      sendResponse({ success: true, entries: networkBuffer.slice(-80) });
-      return true;
-    }
-    if (request.action === 'CLEAR_BADGES') {
-      clearBadges();
-      sendResponse({ success: true });
-      return true;
+      if (request.action === 'GET_DOM') {
+        waitForDomStable().then(() => {
+          return buildDomMap(request.options || {});
+        })
+          .then(result => sendResponse({ dom: result.domString, title: document.title, url: window.location.href, meta: result.meta || {} }))
+          .catch(() => sendResponse({ dom: '', title: document.title, url: window.location.href, meta: {} }));
+        return true;
+      }
+      if (request.action === 'EXECUTE') {
+        // Stability: retry up to 2 times on transient element-not-found failures
+        const runWithRetry = async (cmd, maxRetries = 2) => {
+          let lastErr;
+          for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+              if (attempt > 0) {
+                await waitForDomStable(1500);
+                await sleep(200 * attempt); // back-off: 200ms, 400ms
+              }
+              return await executeAction(cmd);
+            } catch (err) {
+              lastErr = err;
+              const transient = /not found|element|stale|detach/i.test(err.message);
+              if (!transient) throw err; // non-transient → give up immediately
+            }
+          }
+          throw lastErr;
+        };
+
+        runWithRetry(request.command)
+          .then(async (result) => {
+            const changed = await waitForDomChange();
+            if (changed) await sleep(400); // let React finish re-rendering
+            // Record step if macro is active
+            if (isRecordingMacro) {
+              chrome.runtime.sendMessage({
+                action: 'MACRO_RECORD_STEP',
+                step: {
+                  ts: Date.now(),
+                  url: window.location.href,
+                  command: request.command
+                }
+              }).catch(() => {});
+            }
+            sendResponse({ success: true, result });
+          })
+          .catch(err => sendResponse({ success: false, error: err.message }));
+        return true;
+      }
+      if (request.action === 'READ_PAGE') {
+        try {
+          const text = (document.body?.innerText || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .substring(0, 12000);
+          sendResponse({
+            text,
+            title: document.title,
+            url: window.location.href,
+            semantic: analyzePageSemantics(),
+            media: extractMediaContext(),
+            readingMode: extractCleanArticleText()
+          });
+        } catch (_) {
+          sendResponse({ text: '', title: document.title, url: window.location.href });
+        }
+        return true;
+      }
+      if (request.action === 'INSTALL_NETWORK_MONITOR') {
+        try {
+          installNetworkHooks();
+          sendResponse({ success: true });
+        } catch (error) {
+          sendResponse({ success: false, error: error.message });
+        }
+        return true;
+      }
+      if (request.action === 'READ_NETWORK_CACHE') {
+        sendResponse({ success: true, entries: networkBuffer.slice(-80) });
+        return true;
+      }
+      if (request.action === 'CLEAR_BADGES') {
+        clearBadges();
+        sendResponse({ success: true });
+        return true;
+      }
+    } catch (handlerErr) {
+      // Stability: catch so a thrown exception doesn't leave the port hanging
+      try { sendResponse({ success: false, error: String(handlerErr?.message || handlerErr) }); } catch (_) {}
     }
   });
 
@@ -1162,9 +1240,5 @@ if (!window.__ZANYSURF_agent_initialized) {
     return '';
   }
 
-  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  // Note: sleep() is defined near the top of the file — no duplicate needed.
 }
-
-
-
-

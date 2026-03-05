@@ -7,7 +7,7 @@ Give it a goal. It does the work.
 [![Manifest](https://img.shields.io/badge/Manifest-V3-2ea44f)](https://developer.chrome.com/docs/extensions/mv3/intro/)
 [![Chrome](https://img.shields.io/badge/Chrome-Extension-4285F4)](https://developer.chrome.com/docs/extensions/)
 [![Edge](https://img.shields.io/badge/Edge-Compatible-0078D4)](https://microsoftedge.microsoft.com/addons/)
-[![Version](https://img.shields.io/badge/Version-2.1.0-6f42c1)](manifest.json)
+[![Version](https://img.shields.io/badge/Version-2.4.0-6f42c1)](manifest.json)
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
 </div>
@@ -28,6 +28,8 @@ If ZANYSURF saves you time, please star the repo.
 - Monitor prices: track price drops and back-in-stock alerts across marketplaces.
 - Automate your work: navigate, extract, click, and fill forms.
 - Integrate with 1000+ apps: Make.com and Zapier workflows.
+- Record browser macros and replay them instantly.
+- REST API surface for external automation and CI/CD pipelines.
 
 ---
 
@@ -77,6 +79,29 @@ Core agent
 - Safe mode with approval gates
 - Local memory and knowledge graph
 
+DOM engine (v2.4.0)
+- MutationObserver-based DOM stability detection (replaces polling)
+- Shadow DOM and SPA hydration awareness
+- React fiber idle check before capturing DOM
+- Exponential-backoff retry on transient element failures (stale, detached)
+- Stable for 400 ms window before agent reads the page
+- Top-level error boundary in content script message handler
+
+Macro Recorder
+- Record any sequence of browser actions into a named macro
+- Macros are stored locally (100 saved, no cloud)
+- Replay a macro on any active tab with a single command
+- Delete macros and inspect recorded steps
+- Integrate macros into workflows or trigger via REST API
+
+REST API
+- External messaging surface via `chrome.runtime.sendMessage`
+- Run agent, stop agent, get live status, get metrics
+- List and replay workflows and macros
+- Read or clear memory context
+- Enqueue parallel task batches
+- Retrieve audit log and API cost metrics
+
 Automation
 - Scheduler for recurring goals
 - Workflow replay and audit logs
@@ -89,7 +114,81 @@ Price comparison
 
 ---
 
-## LLM Providers
+## Macro Recorder
+
+Record any sequence of browser actions and replay them later — no code required.
+
+**Start recording**
+1. Open the ZANYSURF side panel
+2. Click **Record Macro** (or send `START_MACRO_RECORDING` via the extension API)
+3. Perform your actions — clicks, form fills, navigation
+4. Click **Stop** to save the macro with a name
+
+**Replay**
+- Select a saved macro from the list and click **Replay**
+- Or trigger via the REST API: `REPLAY_MACRO` with `{ macroId }`
+
+**Via extension message API**
+```js
+// Start recording
+chrome.runtime.sendMessage(EXTENSION_ID, { action: 'START_MACRO_RECORDING', goal: 'Login flow' });
+
+// Stop and get steps
+chrome.runtime.sendMessage(EXTENSION_ID, { action: 'STOP_MACRO_RECORDING' });
+
+// Save
+chrome.runtime.sendMessage(EXTENSION_ID, { action: 'SAVE_MACRO', name: 'Login flow' });
+
+// Replay by ID
+chrome.runtime.sendMessage(EXTENSION_ID, { action: 'REPLAY_MACRO', macroId: '<id>' });
+
+// List all macros
+chrome.runtime.sendMessage(EXTENSION_ID, { action: 'LIST_MACROS' });
+
+// Delete
+chrome.runtime.sendMessage(EXTENSION_ID, { action: 'DELETE_MACRO', macroId: '<id>' });
+```
+
+---
+
+## REST API
+
+ZANYSURF exposes an external messaging API that any extension (or native messaging bridge) can call.
+
+**Connection**: use `chrome.runtime.sendMessage(ZANYSURF_EXTENSION_ID, { action, ...params })`.
+
+The extension ID must be added to your caller extension's `externally_connectable` and to ZANYSURF's `manifest.json` `externally_connectable.matches`.
+
+| Action | Params | Response |
+|---|---|---|
+| `RUN_AGENT` | `{ goal }` | `{ success, result }` |
+| `STOP_AGENT` | — | `{ success }` |
+| `GET_STATUS` | — | `{ active, goal, steps }` |
+| `GET_AGENT_METRICS` | — | `{ success, metrics }` |
+| `GET_WORKFLOWS` | — | `{ success, workflows[] }` |
+| `REPLAY_WORKFLOW` | `{ workflowId }` | `{ success, result }` |
+| `GET_MACROS` | — | `{ success, macros[] }` |
+| `SAVE_MACRO` | `{ name, steps[] }` | `{ success, macro }` |
+| `REPLAY_MACRO` | `{ macroId }` | `{ success, result }` |
+| `DELETE_MACRO` | `{ macroId }` | `{ success }` |
+| `GET_MEMORY` | `{ query? }` | `{ success, memory[] }` |
+| `CLEAR_MEMORY` | — | `{ success }` |
+| `ENQUEUE_TASKS` | `{ tasks[] }` | `{ success, queued }` |
+| `GET_TASK_STATUS` | — | `{ success, snapshot }` |
+| `GET_AUDIT_LOG` | — | `{ success, log[] }` |
+| `GET_API_METRICS` | — | `{ success, metrics }` |
+
+**Example — run agent from another extension**
+```js
+const ZANYSURF_ID = '<extension-id>';
+chrome.runtime.sendMessage(ZANYSURF_ID, {
+  action: 'RUN_AGENT',
+  goal: 'Search for "best espresso machine 2026" and return top 3 results'
+}, response => {
+  console.log(response.result);
+});
+```
+
 
 | Provider | Notes |
 |---|---|
@@ -167,12 +266,17 @@ Key components:
 
 ## Changelog
 
-Mar 4, 2026
+Mar 5, 2026 — v2.4.0
+- **DOM fixes**: replaced interval polling with MutationObserver-based `waitForDomStable`. Now detects React/Vue/Angular hydration correctly via shadow DOM observation and React fiber idle check.
+- **Stability fixes**: added exponential-backoff retry (200ms/400ms) for transient element failures; top-level try/catch in content script message handler prevents one bad handler from crashing the rest; removed duplicate `sleep` declaration.
+- **Macro Recorder**: full record, save, replay, delete pipeline. Steps captured from content script, stored in `chrome.storage.local`, replayed tab-by-tab with proper wait logic.
+- **REST API**: expanded `onMessageExternal` with 16 endpoints covering agent control, workflows, macros, memory, tasks, and audit log.
+
+Mar 4, 2026 — v2.1.0
 - Added price comparison planning and marketplace search URLs.
 - Improved vision-mode click reliability.
 - Reduced prompt bloat with context and DOM budgeting.
 - Added chat vs task intent detection.
-- Updated README and version to 2.1.0.
 
 ---
 

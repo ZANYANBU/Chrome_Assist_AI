@@ -34,26 +34,156 @@ let macroRecording = {
   goal: ''
 };
 
+// =============================================================================
+// REST API — External messaging surface (chrome.runtime.sendMessage from
+// other extensions or from native-messaging / WebSocket bridge scripts).
+//
+// Endpoint reference (all via chrome.runtime.sendMessage with extensionId):
+//
+//   Agent
+//     RUN_AGENT           { goal }                 → { success, result }
+//     STOP_AGENT          {}                        → { success }
+//     GET_STATUS          {}                        → { active, goal }
+//     GET_AGENT_METRICS   {}                        → { success, metrics }
+//
+//   Workflows
+//     GET_WORKFLOWS       {}                        → { success, workflows }
+//     REPLAY_WORKFLOW     { workflowId }            → { success, result }
+//
+//   Macros
+//     GET_MACROS          {}                        → { success, macros }
+//     SAVE_MACRO          { name, steps[] }         → { success, macro }
+//     REPLAY_MACRO        { macroId }               → { success, result }
+//     DELETE_MACRO        { macroId }               → { success }
+//
+//   Memory
+//     GET_MEMORY          { query? }                → { success, memory[] }
+//     CLEAR_MEMORY        {}                        → { success }
+//
+//   Tasks
+//     ENQUEUE_TASKS       { tasks[] }               → { success, queued }
+//     GET_TASK_STATUS     {}                        → { success, snapshot }
+//
+//   Audit
+//     GET_AUDIT_LOG       {}                        → { success, log[] }
+//     GET_API_METRICS     {}                        → { success, metrics }
+// =============================================================================
 chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => {
+  // ── Agent ────────────────────────────────────────────────────────────────
   if (request.action === 'RUN_AGENT') {
     const goal = request.goal || request.prompt;
-    if (!goal) {
-       sendResponse({ success: false, error: 'Missing goal.' });
-       return;
-    }
+    if (!goal) { sendResponse({ success: false, error: 'Missing goal.' }); return; }
     runPrompt(goal, { silent: true, trigger: 'api' })
       .then(result => sendResponse({ success: true, result }))
       .catch(err => sendResponse({ success: false, error: err.message }));
     return true;
   }
-  if (request.action === 'REPLAY_WORKFLOW') {
-     replayWorkflow(request.workflowId)
-        .then(result => sendResponse({ success: true, result }))
-        .catch(err => sendResponse({ success: false, error: err.message }));
-     return true;
+  if (request.action === 'STOP_AGENT') {
+    cancelActiveRun('api-stop', false);
+    sendResponse({ success: true, stopped: true });
+    return true;
   }
   if (request.action === 'GET_STATUS') {
-     sendResponse({ success: true, active: agentActive, goal: sessionGoal });
+    sendResponse({ success: true, active: agentActive, goal: sessionGoal, steps: actionHistory.length });
+    return true;
+  }
+  if (request.action === 'GET_AGENT_METRICS') {
+    chrome.storage.local.get([STORAGE_KEYS.API_METRICS])
+      .then(stored => sendResponse({ success: true, metrics: stored[STORAGE_KEYS.API_METRICS] || {} }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  // ── Workflows ────────────────────────────────────────────────────────────
+  if (request.action === 'GET_WORKFLOWS') {
+    listWorkflows()
+      .then(workflows => sendResponse({ success: true, workflows }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  if (request.action === 'REPLAY_WORKFLOW') {
+    replayWorkflow(request.workflowId)
+      .then(result => sendResponse({ success: true, result }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  // ── Macros ───────────────────────────────────────────────────────────────
+  if (request.action === 'GET_MACROS') {
+    listMacros()
+      .then(macros => sendResponse({ success: true, macros }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  if (request.action === 'SAVE_MACRO') {
+    saveMacro(request.name || 'API Macro', request.steps || [])
+      .then(macro => sendResponse({ success: true, macro }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  if (request.action === 'REPLAY_MACRO') {
+    replayMacro(request.macroId)
+      .then(result => sendResponse({ success: true, result }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  if (request.action === 'DELETE_MACRO') {
+    deleteMacro(request.macroId)
+      .then(() => sendResponse({ success: true }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  // ── Memory ───────────────────────────────────────────────────────────────
+  if (request.action === 'GET_MEMORY') {
+    retrieveMemoryContext(String(request.query || 'session'))
+      .then(context => {
+        const memory = String(context || '').split('\n').map(s => s.trim()).filter(Boolean);
+        sendResponse({ success: true, memory });
+      })
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  if (request.action === 'CLEAR_MEMORY') {
+    cancelActiveRun('api-clear', true);
+    actionHistory = [];
+    sessionGoal   = '';
+    sessionMemory = [];
+    memorySystem.clear('all').catch(() => {});
+    sendResponse({ success: true, cleared: true });
+    return true;
+  }
+
+  // ── Tasks ────────────────────────────────────────────────────────────────
+  if (request.action === 'ENQUEUE_TASKS') {
+    const tasks = (request.tasks || []).map(t => ({
+      id:           t.id || crypto.randomUUID(),
+      goal:         String(t.goal || ''),
+      priority:     Number(t.priority) || 5,
+      dependencies: Array.isArray(t.dependencies) ? t.dependencies : [],
+      runner:       new ZanyTaskRunner(String(t.goal || ''), Number(t.priority) || 5)
+    }));
+    asyncTaskEngine.enqueueMany(tasks);
+    sendResponse({ success: true, queued: tasks.length });
+    return true;
+  }
+  if (request.action === 'GET_TASK_STATUS') {
+    sendResponse({ success: true, snapshot: asyncTaskEngine.getSnapshot() });
+    return true;
+  }
+
+  // ── Audit & Metrics ──────────────────────────────────────────────────────
+  if (request.action === 'GET_AUDIT_LOG') {
+    exportAuditLog()
+      .then(result => sendResponse({ success: true, ...result }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  if (request.action === 'GET_API_METRICS') {
+    chrome.storage.local.get([STORAGE_KEYS.API_METRICS])
+      .then(stored => sendResponse({ success: true, metrics: stored[STORAGE_KEYS.API_METRICS] || {} }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
   }
 });
 let activeRunContext = { silent: false, trigger: 'manual' };
@@ -1341,6 +1471,69 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }));
     asyncTaskEngine.enqueueMany(tasks);
     sendResponse({ success: true, queued: tasks.length });
+    return true;
+  }
+
+  // ── Macro Recorder ──────────────────────────────────────────────────────
+  if (request.action === 'START_MACRO_RECORDING') {
+    macroRecording = { active: true, steps: [], goal: request.goal || 'Unnamed Macro', startedAt: Date.now() };
+    // Notify all content scripts to start recording
+    chrome.tabs.query({ active: true, currentWindow: true }).then(tabs => {
+      tabs.forEach(tab => {
+        chrome.tabs.sendMessage(tab.id, { action: 'SET_MACRO_RECORDING', state: true }).catch(() => {});
+      });
+    });
+    broadcast({ action: 'MACRO_RECORDING_STARTED', goal: macroRecording.goal });
+    sendResponse({ success: true, recording: macroRecording });
+    return true;
+  }
+  if (request.action === 'STOP_MACRO_RECORDING') {
+    macroRecording.active = false;
+    chrome.tabs.query({ active: true, currentWindow: true }).then(tabs => {
+      tabs.forEach(tab => {
+        chrome.tabs.sendMessage(tab.id, { action: 'SET_MACRO_RECORDING', state: false }).catch(() => {});
+      });
+    });
+    broadcast({ action: 'MACRO_RECORDING_STOPPED', steps: macroRecording.steps.length });
+    sendResponse({ success: true, steps: macroRecording.steps, stepCount: macroRecording.steps.length });
+    return true;
+  }
+  if (request.action === 'MACRO_RECORD_STEP') {
+    if (macroRecording.active && request.step) {
+      macroRecording.steps.push(request.step);
+      broadcast({ action: 'MACRO_STEP_ADDED', step: request.step, total: macroRecording.steps.length });
+    }
+    sendResponse({ success: true, total: macroRecording.steps.length });
+    return true;
+  }
+  if (request.action === 'GET_MACRO_RECORDING') {
+    sendResponse({ success: true, recording: macroRecording });
+    return true;
+  }
+  if (request.action === 'SAVE_MACRO') {
+    const macroName = request.name || macroRecording.goal || 'Macro ' + new Date().toLocaleString();
+    const steps = Array.isArray(request.steps) ? request.steps : macroRecording.steps;
+    saveMacro(macroName, steps)
+      .then(macro => sendResponse({ success: true, macro }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  if (request.action === 'LIST_MACROS') {
+    listMacros()
+      .then(macros => sendResponse({ success: true, macros }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  if (request.action === 'REPLAY_MACRO') {
+    replayMacro(request.macroId)
+      .then(result => sendResponse({ success: true, result }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  if (request.action === 'DELETE_MACRO') {
+    deleteMacro(request.macroId)
+      .then(() => sendResponse({ success: true }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
     return true;
   }
 });
@@ -4866,7 +5059,74 @@ async function replayWorkflow(workflowId) {
 }
 
 // =============================================================================
-// SMART BOOKMARKS
+// MACROS (RECORD + REPLAY)
+// =============================================================================
+const MACROS_KEY = 'zanysurf_macros';
+
+async function saveMacro(name, steps) {
+  if (!Array.isArray(steps) || steps.length === 0) throw new Error('No steps to save.');
+  const macro = {
+    id: crypto.randomUUID(),
+    name: String(name || 'Unnamed Macro').substring(0, 120),
+    steps: steps.map(s => ({
+      ts:      s.ts      || Date.now(),
+      url:     s.url     || '',
+      command: s.command || {}
+    })),
+    createdAt: Date.now(),
+    runCount:  0
+  };
+  const stored = await chrome.storage.local.get([MACROS_KEY]);
+  const macros = stored[MACROS_KEY] || [];
+  macros.unshift(macro);
+  await chrome.storage.local.set({ [MACROS_KEY]: macros.slice(0, 100) });
+  return macro;
+}
+
+async function listMacros() {
+  const stored = await chrome.storage.local.get([MACROS_KEY]);
+  return stored[MACROS_KEY] || [];
+}
+
+async function deleteMacro(macroId) {
+  const stored = await chrome.storage.local.get([MACROS_KEY]);
+  const macros = (stored[MACROS_KEY] || []).filter(m => m.id !== macroId);
+  await chrome.storage.local.set({ [MACROS_KEY]: macros });
+}
+
+async function replayMacro(macroId) {
+  const macros = await listMacros();
+  const macro = macros.find(m => m.id === macroId);
+  if (!macro) throw new Error('Macro not found: ' + macroId);
+
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+  if (!tab) throw new Error('No active tab found.');
+
+  let replayed = 0;
+  for (const step of macro.steps) {
+    const cmd = step.command || {};
+    if (cmd.action === 'navigate') {
+      await chrome.tabs.update(tab.id, { url: normalizeUrl(String(cmd.value || step.url || '')) });
+      await waitForTabReady(tab.id);
+    } else {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }).catch(() => {});
+      await sleep(200);
+      await chrome.tabs.sendMessage(tab.id, { action: 'EXECUTE', command: cmd }).catch(() => {});
+      await sleep(400);
+    }
+    replayed++;
+    broadcast({ action: 'MACRO_REPLAY_STEP', step: replayed, total: macro.steps.length });
+  }
+
+  macro.runCount = (macro.runCount || 0) + 1;
+  await chrome.storage.local.set({
+    [MACROS_KEY]: macros.map(m => m.id === macro.id ? macro : m)
+  });
+
+  return { success: true, replayed, runCount: macro.runCount, name: macro.name };
+}
+
 // =============================================================================
 const SmartBookmarks = {
   storageKey: 'zanysurf_smart_bookmarks',
