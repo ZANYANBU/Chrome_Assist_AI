@@ -3,7 +3,7 @@
     "name":  "ZANYSURF Browser Agent",
     "short_name":  "ZANYSURF",
     "author":  "Anbuchelvan Valavan",
-    "version":  "2.0.0",
+    "version":  "1.1.0",
     "description":  "AI browser agent with local Ollama, Edge built-in AI, or cloud providers for guided autonomous web navigation and task automation.",
     "browser_specific_settings":  {
                                       "edge":  {
