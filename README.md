@@ -6,7 +6,8 @@ Give it a goal. It does the work.
 
 [![Manifest](https://img.shields.io/badge/Manifest-V3-2ea44f)](https://developer.chrome.com/docs/extensions/mv3/intro/)
 [![Chrome](https://img.shields.io/badge/Chrome-Extension-4285F4)](https://developer.chrome.com/docs/extensions/)
-[![Edge](https://img.shields.io/badge/Edge-Compatible-0078D4)](https://microsoftedge.microsoft.com/addons/)
+[![Edge Add-ons](https://img.shields.io/badge/Edge%20Add--ons-Install-0078D4)](https://microsoftedge.microsoft.com/addons/detail/pmadlohecccigmfcmickngnlikhmnjpa)
+[![Works Offline](https://img.shields.io/badge/Works%20Offline-Ollama-brightgreen)](https://ollama.com)
 [![Version](https://img.shields.io/badge/Version-2.4.0-6f42c1)](manifest.json)
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
@@ -15,6 +16,14 @@ Give it a goal. It does the work.
 ZANYSURF is a Chrome and Edge extension that turns any LLM into a private, autonomous web agent. Type what you want in plain English. It plans, browses, clicks, fills forms, and reports back with full transparency.
 
 If ZANYSURF saves you time, please star the repo.
+
+---
+
+## 🎬 See It In Action
+
+![ZANYSURF Demo](docs/demo.gif)
+
+> Demo GIF coming soon — star the repo to get notified!
 
 ---
 
@@ -204,6 +213,11 @@ chrome.runtime.sendMessage(ZANYSURF_ID, {
 
 ## Install (Chrome and Edge)
 
+> ⚠️ **API Key Notice:** If using Gemini, your API key is stored in
+> `chrome.storage.local`. It never leaves your browser but can be
+> accessed via Chrome DevTools. Use a key with usage limits set at
+> [Google AI Studio](https://aistudio.google.com).
+
 Chrome
 1. Open `chrome://extensions`
 2. Enable Developer mode
@@ -282,7 +296,7 @@ Mar 4, 2026 — v2.1.0
 
 ## Docs
 
-- Privacy policy: [docs/index.md](docs/index.md)
+- Privacy policy: [PRIVACY.md](PRIVACY.md)
 - Launch playbook: [docs/LAUNCH.md](docs/LAUNCH.md)
 - Changelog: [CHANGELOG.md](CHANGELOG.md)
 
@@ -291,20 +305,34 @@ Mar 4, 2026 — v2.1.0
 ## Repository Structure
 
 ```
-byom-ai-browser-agent/
-├─ extension/           # Load this folder in Chrome/Edge
-│  ├─ background.js
-│  ├─ content.js
-│  ├─ popup.html
-│  ├─ popup.js
-│  ├─ popup.css
-│  ├─ manifest.json
-│  └─ icons/
-├─ docs/                # Privacy policy and screenshots
-├─ src/                 # Core modules
-├─ background.js        # Root mirror (keep in sync)
-├─ content.js           # Root mirror (keep in sync)
-└─ README.md
+ZANYSURF/
+├── extension/              ← load this folder in Chrome / Edge (developer mode)
+│   ├── background.js
+│   ├── content.js
+│   ├── dom-text-worker.js
+│   ├── popup.html / popup.js / popup.css
+│   ├── selftest.html / selftest.js
+│   ├── manifest.json
+│   ├── manifest.edge.json
+│   ├── metadata.json
+│   └── icons/
+├── dev-playground/         ← Vite + React build tooling (NOT the extension)
+│   ├── README.md           ← explains this folder
+│   └── App.tsx, vite.config.ts, package.json …
+├── docs/
+│   ├── demo.gif            ← demo screencast (coming soon)
+│   ├── LAUNCH.md
+│   └── screenshots/
+├── qa/                     ← smoke tests and QA reports
+├── launch/                 ← store listing and launch assets
+├── .github/                ← issue templates and CI workflow
+├── .gitignore
+├── README.md
+├── CHANGELOG.md
+├── PRIVACY.md
+├── CONTRIBUTING.md
+├── PERMISSIONS.md
+└── LICENSE
 ```
 
 ---
@@ -322,4 +350,4 @@ byom-ai-browser-agent/
 
 MIT License - see [LICENSE](LICENSE).
 
-Privacy policy: [docs/index.md](docs/index.md)
+Privacy policy: [PRIVACY.md](PRIVACY.md)
