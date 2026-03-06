@@ -7,6 +7,18 @@ coverage/
 .env*
 !.env.example
 
+# Python virtual env
+.venv/
+__pycache__/
+
+# Packed extension zips (use git tags for versioning instead)
+*.zip
+*.crx
+
+# Dev-playground local installs
+dev-playground/node_modules/
+dev-playground/dist/
+
 # Temp helper scripts
 _write_*.py
 _*.py
