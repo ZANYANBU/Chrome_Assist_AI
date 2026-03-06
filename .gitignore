@@ -2,20 +2,29 @@ node_modules/
 build/
 dist/
 coverage/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Logs
 *.log
-.env*
-!.env.example
+npm-debug.log*
+
+# Environment — commit .env.example as a template, never the real secrets
+.env
+.env.local
+.env.*.local
+
+# Packed extension zips — use git tags for releases instead of committing binaries
+*.zip
+*.crx
 
 # Python virtual env
 .venv/
 __pycache__/
 
-# Packed extension zips (use git tags for versioning instead)
-*.zip
-*.crx
-
-# Dev-playground local installs
+# Dev-playground local installs (Vite/React tooling — not part of the extension)
 dev-playground/node_modules/
 dev-playground/dist/
 
